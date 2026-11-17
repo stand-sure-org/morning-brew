@@ -1,0 +1,36 @@
+[project]
+name = "morning-brew"
+version = "0.1.0"
+description = "Launchd-driven triage of Homebrew upgrades"
+requires-python = ">=3.11"
+dependencies = ["pydantic==2.14.3"]
+
+[project.optional-dependencies]
+claude = ["anthropic==2.9.0"]
+
+[project.scripts]
+morning-brew = "morning_brew.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/morning_brew"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: touches real brew, Ollama, network, or an API key"]
+
+[tool.ruff]
+src = ["src", "tests"]
+extend-exclude = ["*.md", ".specify", ".superpowers", ".agents", ".claude", ".entire"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "T201"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/morning_brew/cli.py" = ["T201"]
