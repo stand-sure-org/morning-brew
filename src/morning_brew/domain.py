@@ -140,6 +140,7 @@ class Stamp:
     last_attempt: datetime | None
     quality: Literal["full", "degraded"]
     full_runs: int
+    first_attempt: datetime | None = None  # [R16] dead-man reference before any success
 
 
 @dataclass(frozen=True)

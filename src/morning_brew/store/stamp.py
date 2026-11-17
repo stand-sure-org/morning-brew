@@ -32,6 +32,7 @@ class FileStampStore:
                 last_attempt=_dt(raw.get("last_attempt")),
                 quality=quality,
                 full_runs=full_runs,
+                first_attempt=_dt(raw.get("first_attempt")),
             )
         except (KeyError, ValueError):
             log.warning("ignoring malformed stamp %s", self._path)
@@ -45,6 +46,7 @@ class FileStampStore:
                 "last_attempt": _iso(stamp.last_attempt),
                 "quality": stamp.quality,
                 "full_runs": stamp.full_runs,
+                "first_attempt": _iso(stamp.first_attempt),
             },
         )
 

@@ -412,16 +412,19 @@ def _summary(
 
 def _next_stamp(prev: Stamp | None, summary: Summary, now: datetime) -> Stamp:
     prev_runs = prev.full_runs if prev else 0
+    first = (prev.first_attempt if prev else None) or now
     if summary.quality == "full":
         return Stamp(
             last_full_success=now,
             last_attempt=now,
             quality="full",
             full_runs=prev_runs + 1,
+            first_attempt=first,
         )
     return Stamp(
         last_full_success=prev.last_full_success if prev else None,
         last_attempt=now,
         quality="degraded",
         full_runs=prev_runs,
+        first_attempt=first,
     )

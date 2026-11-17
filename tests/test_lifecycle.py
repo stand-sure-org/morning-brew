@@ -222,3 +222,45 @@ def test_full_run_stamps_success_degraded_does_not(ports_with, calls) -> None:
     s = ports.stamp.written[-1]
     assert s.quality == "full" and s.full_runs == 1
     assert s.last_full_success == NOW and s.last_attempt == NOW
+
+
+def never_succeeded(first: datetime) -> Stamp:
+    return Stamp(
+        last_full_success=None,
+        last_attempt=first,
+        quality="degraded",
+        full_runs=0,
+        first_attempt=first,
+    )
+
+
+def test_dead_man_trips_when_never_succeeded() -> None:
+    now = at("2026-11-19 08:00")
+    assert dead_man(now, never_succeeded(at("2026-11-17 07:00"))) is True  # 49 h
+
+
+def test_dead_man_quiet_on_fresh_install() -> None:
+    now = at("2026-11-19 08:00")
+    assert dead_man(now, never_succeeded(at("2026-11-19 06:00"))) is False  # 2 h
+    assert dead_man(now, None) is False
+
+
+def test_stamp_without_first_attempt_key_reads(tmp_path: Path) -> None:
+    path = tmp_path / "stamp.json"
+    path.write_text(
+        '{"last_full_success": null, "last_attempt": "2026-11-17T07:10:00+00:00",'
+        ' "quality": "degraded", "full_runs": 2}'
+    )
+    stamp = FileStampStore(path).read()
+    assert stamp is not None and stamp.first_attempt is None and stamp.full_runs == 2
+
+
+def test_stamp_write_keeps_first_attempt_once(ports_with, calls) -> None:
+    first = at("2026-11-10 07:00")
+    prev = Stamp(None, first, "degraded", 0, first_attempt=first)
+    ports = ports_with(stamp=FakeStamp(calls, stamp=prev))
+    run_once(ports, Config())
+    assert ports.stamp.written[-1].first_attempt == first
+    fresh = ports_with()
+    run_once(fresh, Config())
+    assert fresh.stamp.written[-1].first_attempt == NOW

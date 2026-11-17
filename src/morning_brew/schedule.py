@@ -30,6 +30,9 @@ def should_run(now: datetime, stamp: Stamp | None, earliest_hour: int) -> GateDe
 
 def dead_man(now: datetime, stamp: Stamp | None, hours: int = 48) -> bool:
     """True when the last full success is older than ``hours``."""
-    if stamp is None or stamp.last_full_success is None:
+    if stamp is None:
         return False
-    return now - stamp.last_full_success > timedelta(hours=hours)
+    reference = stamp.last_full_success or stamp.first_attempt
+    if reference is None:
+        return False
+    return now - reference > timedelta(hours=hours)
