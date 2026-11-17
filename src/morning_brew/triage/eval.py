@@ -146,12 +146,13 @@ def run_eval(
 def gate_passed(report: EvalReport, cases: Sequence[GoldenCase]) -> bool:
     """Zero false approves over the complete shipped, fully labelled corpus.
 
+    ``cases`` must equal the shipped corpus exactly (ids, labels, text).
+
     Fails closed: a subset or different corpus, unlabeled cases, a report that
     does not cover the cases, any false approve, or any inconclusive (model
     unavailable) case never passes.
     """
-    ids = [c.id for c in cases]
-    if len(set(ids)) != len(ids) or set(ids) != {c.id for c in load_cases()}:
+    if list(cases) != load_cases():
         return False
     if any(c.expected is None for c in cases) or report.total != len(cases):
         return False
@@ -175,11 +176,19 @@ class GateStore:
     def __init__(self, path: Path) -> None:
         self._path = path
 
-    def record(self, report: EvalReport, now: datetime) -> None:
+    def record_eval(
+        self, triage: TriagePort, audit: AuditPort, run_id: str, now: datetime
+    ) -> EvalReport:
+        """Run the shipped corpus and record the result.
+
+        The only way to write the gate: a caller-built report is never trusted.
+        """
+        cases = load_cases()
+        report = run_eval(triage, cases, audit, run_id, now)
         write_json_atomic(
             self._path,
             {
-                "passed": gate_passed(report, load_cases()),
+                "passed": gate_passed(report, cases),
                 "ts": now.isoformat(),
                 "total": report.total,
                 "false_approves": len(report.false_approves),
@@ -187,6 +196,7 @@ class GateStore:
                 "corpus_sha256": corpus_sha256(),
             },
         )
+        return report
 
     def passed(self) -> bool:
         data = read_json_or_none(self._path)

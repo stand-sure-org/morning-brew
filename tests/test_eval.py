@@ -17,7 +17,6 @@ from morning_brew.domain import (
     UnlabeledCases,
 )
 from morning_brew.triage.eval import (
-    EvalReport,
     GateStore,
     GoldenCase,
     effective_verdict,
@@ -61,6 +60,14 @@ def labeled() -> list[GoldenCase]:
             c = replace(c, expected="upgrade" if i % 2 else "hold")
         out.append(c)
     return out
+
+
+def _patch_corpus(
+    monkeypatch: pytest.MonkeyPatch, cs: list[GoldenCase] | None = None
+) -> list[GoldenCase]:
+    cs = labeled() if cs is None else cs
+    monkeypatch.setattr(eval_mod, "load_cases", lambda path=None: list(cs))
+    return cs
 
 
 def test_corpus_shape() -> None:
@@ -117,8 +124,10 @@ def test_approve_everything_fails_the_gate() -> None:
     assert not gate_passed(r, cs)
 
 
-def test_hold_everything_passes_the_gate_but_reports_missed() -> None:
-    cs = labeled()
+def test_hold_everything_passes_the_gate_but_reports_missed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cs = _patch_corpus(monkeypatch)
     r = run_eval(hold_all(), cs, FakeAudit([]), "r1")
     assert gate_passed(r, cs)
     assert eval_exit_code(r, cs) == 0
@@ -142,14 +151,15 @@ def test_approving_an_owner_labeled_upgrade_is_not_a_false_approve() -> None:
     assert not r.false_approves and not r.missed_upgrades
 
 
-def test_all_transient_run_does_not_pass(tmp_path: Path) -> None:
-    cs = labeled()
-    r = run_eval(Fixed("transient", []), cs, FakeAudit([]), "r")
+def test_all_transient_run_does_not_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cs = _patch_corpus(monkeypatch)
+    g = GateStore(tmp_path / "g.json")
+    r = g.record_eval(Fixed("transient", []), FakeAudit([]), "r", NOW)
     assert len(r.inconclusive) == len(cs)
     assert not gate_passed(r, cs)
     assert eval_exit_code(r, cs) == 1
-    g = GateStore(tmp_path / "g.json")
-    g.record(r, NOW)
     assert not g.passed()
 
 
@@ -213,15 +223,14 @@ def test_live_mode_requires_recorded_pass(tmp_path: Path) -> None:
 def test_gate_store_records_pass_and_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cs = labeled()
-    monkeypatch.setattr(eval_mod, "load_cases", lambda path=None: list(cs))
+    cs = _patch_corpus(monkeypatch)
     g = GateStore(tmp_path / "g.json")
     assert not g.passed()
-    g.record(run_eval(approve_all(), cs, FakeAudit([]), "r"), NOW)
+    g.record_eval(approve_all(), FakeAudit([]), "r", NOW)
     assert not g.passed()
     with pytest.raises(GateNotPassed):
         require_gate(Config(chain_mode="live"), g)
-    g.record(run_eval(hold_all(), cs, FakeAudit([]), "r"), NOW)
+    g.record_eval(hold_all(), FakeAudit([]), "r", NOW)
     data = json.loads((tmp_path / "g.json").read_text())
     assert data["passed"] is True and data["total"] == len(cs)
     assert data["false_approves"] == 0 and "ts" in data
@@ -237,21 +246,20 @@ def test_gate_store_corrupt_is_not_passed(tmp_path: Path) -> None:
     assert not GateStore(p).passed()
 
 
-def _patch_corpus(monkeypatch: pytest.MonkeyPatch) -> list[GoldenCase]:
-    cs = labeled()
-    monkeypatch.setattr(eval_mod, "load_cases", lambda path=None: list(cs))
-    return cs
-
-
-def test_record_with_handmade_report_never_passes(tmp_path: Path) -> None:
+def test_no_api_records_a_caller_built_report(tmp_path: Path) -> None:
     g = GateStore(tmp_path / "g.json")
-    g.record(EvalReport(1, (), ()), NOW)
-    assert not g.passed()
+    assert not hasattr(g, "record")
+    assert not [n for n in dir(g) if n.startswith("record") and n != "record_eval"]
+    assert not (tmp_path / "g.json").exists()
 
 
-def test_record_on_unlabeled_shipped_corpus_never_passes(tmp_path: Path) -> None:
+def test_record_eval_on_unlabeled_corpus_never_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_corpus(monkeypatch, load_cases())
     g = GateStore(tmp_path / "g.json")
-    g.record(EvalReport(len(load_cases()), (), ()), NOW)
+    with pytest.raises(UnlabeledCases):
+        g.record_eval(hold_all(), FakeAudit([]), "r", NOW)
     assert not g.passed()
 
 
@@ -261,22 +269,55 @@ def test_subset_corpus_never_passes() -> None:
     assert not r.false_approves and not gate_passed(r, cs)
 
 
-def test_full_labeled_all_hold_correct_run_passes(
+def test_duplicated_ids_corpus_fails_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    cs = _patch_corpus(monkeypatch)
+    dup = [cs[0]] * len(cs)
+    r = run_eval(hold_all(), dup, FakeAudit([]), "r")
+    assert not gate_passed(r, dup)
+
+
+def test_relabeled_cases_never_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cs = _patch_corpus(monkeypatch)
+    relabeled = [replace(c, expected="upgrade") for c in cs]
+    r = run_eval(approve_all(), relabeled, FakeAudit([]), "r")
+    assert not r.false_approves
+    assert not gate_passed(r, relabeled)
+
     g = GateStore(tmp_path / "g.json")
-    g.record(run_eval(hold_all(), cs, FakeAudit([]), "r"), NOW)
+    g.record_eval(approve_all(), FakeAudit([]), "r", NOW)
+    assert not g.passed()
+
+
+def test_full_labeled_hold_stub_passes_and_live_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_corpus(monkeypatch)
+    g = GateStore(tmp_path / "g.json")
+    r = g.record_eval(hold_all(), FakeAudit([]), "r", NOW)
+    assert r.total == len(load_cases())
     assert g.passed()
     require_gate(Config(chain_mode="live"), g)
+
+
+def test_full_labeled_approve_all_stub_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_corpus(monkeypatch)
+    g = GateStore(tmp_path / "g.json")
+    g.record_eval(approve_all(), FakeAudit([]), "r", NOW)
+    assert not g.passed()
+    with pytest.raises(GateNotPassed):
+        require_gate(Config(chain_mode="live"), g)
 
 
 def test_stale_corpus_hash_invalidates_recorded_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cs = _patch_corpus(monkeypatch)
+    _patch_corpus(monkeypatch)
     g = GateStore(tmp_path / "g.json")
-    g.record(run_eval(hold_all(), cs, FakeAudit([]), "r"), NOW)
+    g.record_eval(hold_all(), FakeAudit([]), "r", NOW)
     data = json.loads((tmp_path / "g.json").read_text())
     data["corpus_sha256"] = "0" * 64
     (tmp_path / "g.json").write_text(json.dumps(data))
