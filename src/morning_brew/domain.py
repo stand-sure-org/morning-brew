@@ -1,6 +1,6 @@
 """Domain types shared by the orchestrator and every adapter."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -256,3 +256,13 @@ def request_from(c: Candidate) -> TriageRequest:
         dependents=c.dependents,
         is_leaf=c.is_leaf,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+CommandRunner = Callable[[Sequence[str], float], CommandResult]
