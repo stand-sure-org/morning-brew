@@ -188,6 +188,8 @@ def test_flagged_boolean_blocks_upgrade():
         ("v2 is incompatible with v1 files", "mentions_data_format"),
         ("you must reindex", "mentions_data_format"),
         ("config rewrite on first start", "mentions_data_format"),
+        ("the index was rewritten on disk", "mentions_data_format"),
+        ("REWRITING caches", "mentions_data_format"),
         ("Reload the daemon", "mentions_restart"),
         ("reboot afterwards", "mentions_restart"),
         ("launchctl unload it", "mentions_restart"),
@@ -228,9 +230,24 @@ def test_hold_verdict_never_accepted():
     assert not accepts_upgrade(None, assessment(verdict="hold", boilerplate_only=True))
 
 
-def test_risk_boolean_with_boilerplate_is_accepted_per_contract():
-    a = assessment(mentions_restart=True, boilerplate_only=True, verdict="upgrade")
-    assert accepts_upgrade("Restart any running sshd", a)
+def test_boilerplate_cannot_override_flagged_risk():
+    a = assessment(mentions_migration=True, boilerplate_only=True, verdict="upgrade")
+    assert not accepts_upgrade("Run `x migrate` first", a)
+    assert not accepts_upgrade(None, a)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "mentions_migration",
+        "mentions_data_format",
+        "mentions_restart",
+        "mentions_manual_step",
+    ],
+)
+def test_any_risk_boolean_blocks_even_with_boilerplate(field):
+    a = assessment(boilerplate_only=True, verdict="upgrade", **{field: True})
+    assert not accepts_upgrade("Completion installed to /opt/x", a)
 
 
 def test_golden_migration_injection_cannot_pass_with_all_false():

@@ -1,7 +1,15 @@
 """Deterministic coverage check over the model's risk booleans (FR-056).
 
 A model that says "all clear" on a caveat whose text carries a risk cue
-cannot cause an upgrade: every cue present must have its boolean set.
+cannot cause an upgrade: every cue present must have its boolean set, and
+any risk boolean set blocks the upgrade. ``boilerplate_only`` is advisory and
+never overrides a flagged risk (coordinator ruling R42).
+
+Documented limits of the closed cue lexicon (these rely on the model's
+booleans, not on this check):
+- look-alike letters inside ASCII ("MlGRATE" with a lowercase l);
+- non-English stems ("migracion" with an accent has no ``migrat``);
+- paraphrases with no cue word ("convert your database with x upgrade-db").
 """
 
 import re
@@ -14,9 +22,7 @@ from morning_brew.triage.suspicious import INVISIBLE_CHARS
 _FLAGS = re.IGNORECASE
 
 MIGRATION_CUES = re.compile(r"migrat", _FLAGS)
-DATA_FORMAT_CUES = re.compile(
-    r"data\s+format|schema|incompatib|reindex|rewrite", _FLAGS
-)
+DATA_FORMAT_CUES = re.compile(r"data\s+format|schema|incompatib|reindex|rewrit", _FLAGS)
 RESTART_CUES = re.compile(r"restart|reload|reboot|launchctl|brew\s+services", _FLAGS)
 MANUAL_STEP_CUES = re.compile(
     r"you\s+must|you\s+need\s+to|manually|run\s+the\s+following|please\s+run",
@@ -58,4 +64,4 @@ def coverage_ok(caveat: str | None, a: RiskAssessment) -> bool:
 def accepts_upgrade(caveat: str | None, a: RiskAssessment) -> bool:
     if a.verdict != "upgrade" or not coverage_ok(caveat, a):
         return False
-    return a.boilerplate_only or not any(getattr(a, f) for f in _RISK_FIELDS)
+    return not any(getattr(a, f) for f in _RISK_FIELDS)
