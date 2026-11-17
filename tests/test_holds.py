@@ -127,7 +127,7 @@ def test_ensure_writable_when_root_is_a_file(tmp_path):
         FileHoldStore(f).ensure_writable()
 
 
-def test_list_sorted_and_separates_kinds(tmp_path):
+def test_list_separates_kinds(tmp_path):
     s = FileHoldStore(tmp_path)
     s.put(hold("b", kind=HoldKind.TRANSIENT))
     s.put(hold("a"))
