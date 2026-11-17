@@ -10,22 +10,26 @@ import re
 REDACTED = "***REDACTED***"
 
 _SENSITIVE_PATTERNS = [
-    # keyword secrets: optional quotes, REQUIRED [:=] separator (prose is untouched)
+    # keyword secrets: optional quotes, REQUIRED [:=] separator (prose is
+    # untouched). A leading auth scheme word (Bearer/Basic) is kept and the
+    # credential after it is the value, so the scheme never stands in for it.
     re.compile(
-        r"([\"']?(?:password|secret|token|api[_\s-]?key)[\"']?\s*[:=]\s*[\"']?)([^\s\"',]+)",
+        r"([\"']?(?:password|secret|token|api[_\s-]?key)[\"']?\s*[:=]\s*[\"']?"
+        r"(?:(?:Bearer|Basic)[ \t]+)?)([^\s\"',]+)",
         re.IGNORECASE,
     ),
-    # env-var secrets: name chars only, REQUIRED [:=] separator, horizontal
-    # whitespace only. Linear, and idempotent (the marker re-redacts to itself).
+    # env-var secrets: name chars only, an optional closing quote (JSON or
+    # dict key), REQUIRED [:=] separator, horizontal whitespace only.
+    # Linear, and idempotent (the marker re-redacts to itself).
     re.compile(
-        r"(AWS_SECRET[A-Z0-9_]*[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)", re.IGNORECASE
+        r"(AWS_SECRET[A-Z0-9_]*[\"']?[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)", re.IGNORECASE
     ),
     re.compile(
-        r"(AWS_SESSION_TOKEN[A-Z0-9_]*[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)",
+        r"(AWS_SESSION_TOKEN[A-Z0-9_]*[\"']?[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)",
         re.IGNORECASE,
     ),
     re.compile(
-        r"(ANTHROPIC_API_KEY[A-Z0-9_]*[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)",
+        r"(ANTHROPIC_API_KEY[A-Z0-9_]*[\"']?[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)",
         re.IGNORECASE,
     ),
     re.compile(r"(Bearer\s+)(\S+)", re.IGNORECASE),

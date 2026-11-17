@@ -256,6 +256,14 @@ IDEMPOTENCE_PROBES = [
     "AWS_" + "SESSION_TOKEN=" + AWS_VALUE,
     "ANTHROPIC_" + "API_KEY: '" + AWS_VALUE + "'",
     "xox" + "b-" + TAIL,
+    '{"' + AWS_NAME + '": "' + AWS_VALUE + '"}',
+    "{'" + AWS_NAME + "': '" + AWS_VALUE + "'}",
+    '{"AWS_' + 'SESSION_TOKEN": "' + AWS_VALUE + '"}',
+    "{'ANTHROPIC_" + "API_KEY': '" + AWS_VALUE + "'}",
+    "token: Bearer " + TAIL,
+    "Authorization: Bearer " + TAIL,
+    "password: Basic " + TAIL,
+    '{"token": "Bearer ' + TAIL + '"}',
 ]
 
 
@@ -274,6 +282,10 @@ def test_redact_is_idempotent(text):
         AWS_NAME + ' = "' + AWS_VALUE + '"',
         "AWS_" + "SESSION_TOKEN=" + AWS_VALUE,
         "ANTHROPIC_" + "API_KEY=" + AWS_VALUE,
+        '{"' + AWS_NAME + '": "' + AWS_VALUE + '"}',
+        "{'" + AWS_NAME + "': '" + AWS_VALUE + "'}",
+        '{"AWS_' + 'SESSION_TOKEN": "' + AWS_VALUE + '"}',
+        "{'ANTHROPIC_" + "API_KEY': '" + AWS_VALUE + "'}",
     ],
 )
 def test_env_var_secret_fully_redacted(text):
@@ -294,3 +306,20 @@ def test_env_var_pattern_is_linear():
     start = time.monotonic()
     redact(text)
     assert time.monotonic() - start < 0.05
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "token: Bearer " + TAIL,
+        "Authorization: Bearer " + TAIL,
+        "password: Basic " + TAIL,
+        "PASSWORD=basic " + TAIL,
+        '{"token": "Bearer ' + TAIL + '"}',
+    ],
+)
+def test_auth_scheme_after_keyword_does_not_leak(text):
+    out = redact(text)
+    assert TAIL[:4] not in out and TAIL[4:] not in out
+    assert "***REDACTED***" in out
+    assert redact(out) == out

@@ -18,6 +18,8 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)")
 # paragraph separators, the braille blank and the Hangul fillers, which
 # render as nothing. Unassigned code points (Cn) count too: several ranges
 # are reserved as default-ignorable and render as nothing when assigned.
+# Cn also covers code points assigned after this Python's unicodedata
+# version: they look unassigned here, so they are flagged and fail safe (hold).
 _INVISIBLE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Cn"})
 _INVISIBLE_EXTRA = frozenset(
     [0x2028, 0x2029, 0x2800, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x180E, 0x034F]
