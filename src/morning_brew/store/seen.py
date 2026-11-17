@@ -116,7 +116,7 @@ def seed_caveat_hashes(
     seeded = 0
     for name, text in installed_caveats.items():
         h = caveat_hash(text)
-        if h is None:
+        if h is None or store.caveat_hash(name) is not None:
             continue
         store.record_caveat_hash(name, h)
         seeded += 1

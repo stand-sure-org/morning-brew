@@ -59,10 +59,11 @@ def test_seed_counts_only_present_caveats(tmp_path):
     assert s.caveat_hash("a") == caveat_hash("x") and s.caveat_hash("b") is None
 
 
-def test_corrupt_file_reads_as_empty(tmp_path):
+def test_corrupt_file_reads_as_empty(tmp_path, caplog):
     (tmp_path / "seen.json").write_text("{")
     s = FileSeenStore(tmp_path / "seen.json")
     assert s.first_seen("p", "1") is None
+    assert any(r.levelname == "WARNING" for r in caplog.records)
     s.record_first_seen("p", "1", T1)
     assert s.first_seen("p", "1") == T1
 
@@ -77,3 +78,27 @@ def test_file_mode_0600(tmp_path):
     s = FileSeenStore(tmp_path / "state" / "seen.json")
     s.record_first_seen("p", "1", T1)
     assert stat.S_IMODE(os.stat(tmp_path / "state" / "seen.json").st_mode) == 0o600
+
+
+def test_reupgrade_rearms_cleanup(tmp_path):
+    s = FileSeenStore(tmp_path / "seen.json")
+    s.record_upgrade(1, ["a"])
+    s.mark_cleaned(["a"])
+    s.record_upgrade(3, ["a"])
+    assert "a" not in s.due_for_cleanup(4, 2)
+    assert "a" in s.due_for_cleanup(5, 2)
+
+
+def test_cleanup_counts_from_latest_upgrade(tmp_path):
+    s = FileSeenStore(tmp_path / "seen.json")
+    s.record_upgrade(1, ["a"])
+    s.record_upgrade(3, ["a"])
+    assert "a" not in s.due_for_cleanup(4, 2)
+    assert "a" in s.due_for_cleanup(5, 2)
+
+
+def test_seed_never_overwrites_existing_hash(tmp_path):
+    s = FileSeenStore(tmp_path / "seen.json")
+    s.record_caveat_hash("a", "stored")
+    assert seed_caveat_hashes(s, {"a": "changed text", "b": "new"}) == 1
+    assert s.caveat_hash("a") == "stored" and s.caveat_hash("b") == caveat_hash("new")
