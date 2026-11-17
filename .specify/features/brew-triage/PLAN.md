@@ -666,7 +666,7 @@ def test_list_separates_kinds(): assert [h.kind for h in s.list_all()] ...
 
 ### Task T12 (3 pts): Reconcile and hold aging (FR-062, 064)
 
-**Files:** Create `src/morning_brew/{reconcile.py,aging.py}`, `tests/test_reconcile_aging.py`; Modify `orchestrator.py` (call `reconcile`, fill summary aging fields, urgent notify on stale holds)
+**Files:** Create `src/morning_brew/{reconcile.py,aging.py}`, `tests/test_reconcile_aging.py`; Modify `orchestrator.py` (call `reconcile`, fill summary aging fields, urgent notify on stale holds, and apply existing holds before triage [ruling R14])
 
 **Interfaces:**
 - Consumes: `Snapshot`, `HoldStorePort`, `Hold`.
@@ -681,6 +681,13 @@ def digest_due(last_digest: datetime | None, now: datetime) -> bool      # >= 7 
 def render_digest(aging: Aging, stale: Sequence[Hold]) -> str
 ```
 
+[ruling R14 — FR-061 wiring no earlier task owns] Before triage, `run_once` consults `ports.holds.get(name)` for every candidate, using `needs_retriage` / `is_suppressed` from T11:
+- a hold with `is_suppressed(hold, current)` true -> the member's decision becomes HOLD (decided), rule_id `"skip"`, reason "skipped by owner for this version", whatever the rules said — an owner skip is never auto-upgraded;
+- a DECIDED hold with `needs_retriage(hold, current)` false and a GREY rule decision -> keep the prior decided HOLD without calling triage (no repeat model call for the same version);
+- TRANSIENT holds are always retried (rules + triage run as normal);
+- a hold whose package is no longer outdated is released.
+The reconcile return value (names released because the owner now pins them) is audited (stage "reconcile").
+
 - [ ] **Step 1: Write the failing tests:**
 
 ```python
@@ -690,6 +697,16 @@ def test_aging_counts_decided_only_for_age():
     a = hold_aging([decided(age=3), decided(age=20, blocked_by="awscli"), transient(age=40)], NOW)
     assert (a.decided_count, a.oldest_decided_days, a.blocked_by_dep_count, a.transient_count) == (2, 20, 1, 1)
 def test_stale_threshold_and_digest(): assert [h.name for h in stale_holds(holds, NOW, 14)] == ["old"] and digest_due(None, NOW) and not digest_due(NOW - 6d, NOW)
+def test_owner_skip_is_never_auto_upgraded():          # R14
+    r = run_once(ports_with(existing_holds=[hold("a", held_at_version="1.0", skipped_for_version="1.0")], current={"a":"1.0"}, rules_say_eligible={"a"}), Config())
+    assert "brew.upgrade:a" not in calls and holds.get("a").kind is HoldKind.DECIDED
+def test_decided_hold_same_version_is_not_retriaged():  # R14
+    run_once(ports_with(existing_holds=[decided("g", held_at_version="0.1")], current={"g":"0.1"}, grey={"g"}), Config()); assert triage.calls == 0
+def test_decided_hold_new_version_is_retriaged():       # R14
+    run_once(ports_with(existing_holds=[decided("g", held_at_version="0.1")], current={"g":"0.2"}, grey={"g"}), Config()); assert triage.calls == 1
+def test_transient_hold_is_retried_every_run():         # R14
+    run_once(ports_with(existing_holds=[transient("g", held_at_version="0.1")], current={"g":"0.1"}, grey={"g"}), Config()); assert triage.calls == 1
+def test_hold_released_when_no_longer_outdated(): ...   # R14
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/test_reconcile_aging.py -v`. Expected: FAIL.
@@ -1146,7 +1163,7 @@ def test_audit_records_review_actions(): ...
 - Produces:
 
 ```python
-def build_deps(config_path: Path | None = None) -> CliDeps          # real adapters; builds TriageChain(local=OllamaClient|None, claude=ClaudeClient, mode=config.chain_mode); calls require_gate
+def build_deps(config_path: Path | None = None) -> CliDeps          # real adapters; builds TriageChain(local=OllamaClient|None, claude=ClaudeClient, mode=config.chain_mode); calls require_gate; sets Ports.self_deps = detect_self_deps(Path(sys.executable)) [ruling R13]
 @dataclass(frozen=True) class ShadowReport: runs:int; would_upgrade:int; would_hold:int; disagreements:int
 def shadow_report(events: Iterable[AuditEvent]) -> ShadowReport
 ```
