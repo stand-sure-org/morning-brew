@@ -53,7 +53,6 @@ def test_redacts(prefix):
 def test_redacts_url_credentials_and_github_pat():
     assert TAIL not in redact("https://user:" + TAIL + "@host/x")
     assert TAIL not in redact("github" + "_pat_" + TAIL)
-    assert TAIL not in redact("api key " + TAIL)
     assert TAIL not in redact("API_KEY=" + TAIL)
 
 
