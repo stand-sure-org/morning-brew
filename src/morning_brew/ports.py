@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -99,3 +99,4 @@ class Ports:
     lock: LockPort
     stamp: StampPort
     clock: Callable[[], datetime]
+    self_deps: frozenset[str] = field(default_factory=frozenset)  # [R13]

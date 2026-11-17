@@ -15,6 +15,7 @@ from morning_brew.domain import (
     ComponentPlan,
     Decision,
     Hold,
+    RuleContext,
     Snapshot,
     Stamp,
     Summary,
@@ -196,10 +197,15 @@ class FakeStamp:
 def recording_rules(
     calls: list[str], decisions: Sequence[Decision]
 ) -> Callable[..., list[Decision]]:
-    def rules(snapshot: Snapshot, ctx: object) -> list[Decision]:
+    """Records each RuleContext it receives on ``rules.contexts``."""
+    contexts: list[RuleContext] = []
+
+    def rules(snapshot: Snapshot, ctx: RuleContext) -> list[Decision]:
         calls.append("rules")
+        contexts.append(ctx)
         return list(decisions)
 
+    rules.contexts = contexts  # type: ignore[attr-defined]
     return rules
 
 

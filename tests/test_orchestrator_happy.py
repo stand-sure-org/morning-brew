@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -135,3 +136,9 @@ def test_apply_outcome_only_moves_grey() -> None:
     )
     eligible = Decision("e", Verdict.ELIGIBLE, "R12", "clean")
     assert apply_outcome(eligible, TriageOutcome("hold", "no", "claude")) is eligible
+
+
+def test_self_deps_reach_rule_context(ports: Ports) -> None:  # [ruling R13]
+    ports = replace(ports, self_deps=frozenset({"fnox"}))
+    run_once(ports, Config())
+    assert ports.rules.contexts[-1].self_deps == frozenset({"fnox"})
