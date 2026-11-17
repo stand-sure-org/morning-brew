@@ -23,6 +23,7 @@ from morning_brew.domain import (
     Decision,
     Hold,
     HoldKind,
+    LockHeld,
     RuleContext,
     RunResult,
     Snapshot,
@@ -35,6 +36,7 @@ from morning_brew.domain import (
 )
 from morning_brew.ports import Ports
 from morning_brew.rules import apply_outcome
+from morning_brew.schedule import dead_man, should_run
 
 log = logging.getLogger(__name__)
 
@@ -52,11 +54,29 @@ BUDGET_REASON = "run budget exceeded; retry next run"
 
 
 def run_once(ports: Ports, config: Config, *, dry_run: bool = False) -> RunResult:
-    with ports.lock.acquire():
-        now = ports.clock()
-        run_id = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-        prev_stamp = ports.stamp.read()
-        current_seq = prev_stamp.full_runs if prev_stamp else 0
+    try:
+        with ports.lock.acquire():
+            return _locked_run(ports, config, dry_run=dry_run)
+    except LockHeld:
+        log.warning("another morning-brew run holds the lock; exiting")
+        return RunResult(exit_code=EXIT_TEMPFAIL, summary=None)
+
+
+def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
+    now = ports.clock()
+    run_id = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    prev_stamp = ports.stamp.read()
+    current_seq = prev_stamp.full_runs if prev_stamp else 0
+    stale = dead_man(now, prev_stamp, config.dead_man_hours)
+
+    # A dry run is an explicit request: it bypasses the gate [R2].
+    if not dry_run:
+        gate = should_run(now, prev_stamp, config.earliest_hour)
+        if not gate.run:
+            log.info("gated no-op: %s", gate.reason)
+            if stale:
+                _notify(ports, _gated_summary(run_id, stale))
+            return RunResult(exit_code=EXIT_OK, summary=None)
 
         try:
             ports.holds.ensure_writable()
@@ -68,56 +88,84 @@ def run_once(ports: Ports, config: Config, *, dry_run: bool = False) -> RunResul
         except BrewUpdateError:
             log.exception("brew update failed; aborting before any mutation")
             return RunResult(exit_code=EXIT_TEMPFAIL, summary=None)
-        snapshot = ports.brew.snapshot()
-        candidates = {c.full_name: c for c in snapshot.candidates}
-        live = ports.live.live_set(snapshot)
+    snapshot = ports.brew.snapshot()
+    candidates = {c.full_name: c for c in snapshot.candidates}
+    live = ports.live.live_set(snapshot)
+    if not dry_run:
         ports.reconcile(snapshot, ports.holds)
         _deferred_cleanup(ports, config, current_seq, live)
-
         for c in snapshot.candidates:
             ports.seen.record_first_seen(c.full_name, c.current, now)
-        ctx = RuleContext(
-            live=live,
-            trusted_taps=config.trusted_taps,
-            self_deps=ports.self_deps,
-            now=now,
-            min_age_days=config.min_age_days,
-            first_seen=ports.seen.first_seen,
-            caveat_hash=ports.seen.caveat_hash,
-        )
-        decisions = ports.rules(snapshot, ctx)
+    ctx = RuleContext(
+        live=live,
+        trusted_taps=config.trusted_taps,
+        self_deps=ports.self_deps,
+        now=now,
+        min_age_days=config.min_age_days,
+        first_seen=ports.seen.first_seen,
+        caveat_hash=ports.seen.caveat_hash,
+    )
+    decisions = ports.rules(snapshot, ctx)
+    plans = ports.components(snapshot, decisions)
+
+    outcomes = _triage_grey(ports, config, now, plans, decisions, candidates)
+    if outcomes:
+        decisions = [
+            apply_outcome(d, outcomes[d.full_name]) if d.full_name in outcomes else d
+            for d in decisions
+        ]
         plans = ports.components(snapshot, decisions)
 
-        outcomes = _triage_grey(ports, config, now, plans, decisions, candidates)
-        if outcomes:
-            decisions = [
-                apply_outcome(d, outcomes[d.full_name])
-                if d.full_name in outcomes
-                else d
-                for d in decisions
-            ]
-            plans = ports.components(snapshot, decisions)
-
-        _store_holds(ports, decisions, plans, outcomes, candidates, now)
-        applied = _apply(ports, plans)
-        _store_busy(ports, applied, candidates, now)
-        if applied.upgraded:
-            ports.seen.record_upgrade(current_seq + 1, applied.upgraded)
-        post = ports.brew.snapshot()
-        applied.anomalies.extend(_verify(snapshot, post, applied))
-
+    if dry_run:
+        idle = _Applied()
         for event in _audit_events(
-            run_id, now, snapshot, decisions, plans, outcomes, applied
+            run_id, now, snapshot, decisions, plans, outcomes, idle, "dry_run"
         ):
             ports.audit.record(event)
-
         summary = _summary(
-            run_id, now, config, ports, decisions, plans, outcomes, applied
+            run_id, now, config, ports, decisions, plans, outcomes, idle, stale
         )
-        ports.status.write(summary)
-        _notify(ports, summary)
-        ports.stamp.write(_next_stamp(prev_stamp, summary, now))
         return RunResult(exit_code=EXIT_OK, summary=summary)
+
+    _store_holds(ports, decisions, plans, outcomes, candidates, now)
+    applied = _apply(ports, plans)
+    _store_busy(ports, applied, candidates, now)
+    if applied.upgraded:
+        ports.seen.record_upgrade(current_seq + 1, applied.upgraded)
+    post = ports.brew.snapshot()
+    applied.anomalies.extend(_verify(snapshot, post, applied))
+
+    for event in _audit_events(
+        run_id, now, snapshot, decisions, plans, outcomes, applied, "decide"
+    ):
+        ports.audit.record(event)
+
+    summary = _summary(
+        run_id, now, config, ports, decisions, plans, outcomes, applied, stale
+    )
+    ports.status.write(summary)
+    _notify(ports, summary)
+    ports.stamp.write(_next_stamp(prev_stamp, summary, now))
+    return RunResult(exit_code=EXIT_OK, summary=summary)
+
+
+def _gated_summary(run_id: str, stale: bool) -> Summary:
+    return Summary(
+        run_id=run_id,
+        quality="degraded",
+        upgraded=(),
+        failed=(),
+        decided_holds=0,
+        oldest_decided_hold_days=None,
+        blocked_by_dep=0,
+        transient=0,
+        self_dep_commands=(),
+        disagreements=(),
+        live_old_binary=(),
+        anomalies=(),
+        dead_man=stale,
+        degraded_reasons=("dead-man: no full success within the window",),
+    )
 
 
 def _notify(ports: Ports, summary: Summary) -> None:
@@ -288,6 +336,7 @@ def _audit_events(
     plans: Sequence[ComponentPlan],
     outcomes: Mapping[str, TriageOutcome],
     applied: _Applied,
+    stage: str,
 ) -> list[AuditEvent]:
     plan_of = {m: p for p in plans for m in p.members}
     events: list[AuditEvent] = []
@@ -309,7 +358,7 @@ def _audit_events(
                 run_id=run_id,
                 ts=now,
                 brew_version=snapshot.brew_version,
-                stage="decide",
+                stage=stage,
                 package=d.full_name,
                 rule_id="chain" if outcome else d.rule_id,
                 verdict=str(verdict),
@@ -331,6 +380,7 @@ def _summary(
     plans: Sequence[ComponentPlan],
     outcomes: Mapping[str, TriageOutcome],
     applied: _Applied,
+    stale: bool,
 ) -> Summary:
     decided = [h for h in ports.holds.list_all() if h.kind is HoldKind.DECIDED]
     oldest = max(((now - h.first_held).days for h in decided), default=None)
@@ -355,7 +405,7 @@ def _summary(
         disagreements=tuple(n for n, o in outcomes.items() if o.disagreement),
         live_old_binary=(),
         anomalies=tuple(applied.anomalies),
-        dead_man=False,
+        dead_man=stale,
         degraded_reasons=("transient holds",) if transient else (),
     )
 
