@@ -406,3 +406,13 @@ def test_already_running_on_success_is_not_busy():
     )
     result = make_cli(runner).upgrade(["a"])
     assert result.ok is True
+
+
+def test_subprocess_runner_feeds_input_to_stdin():
+    result = SubprocessRunner(SAFE_ENV)(
+        [sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"],
+        10,
+        input="hello",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "HELLO"

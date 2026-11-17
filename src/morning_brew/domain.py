@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Protocol
 
 
 class Kind(StrEnum):
@@ -273,4 +273,9 @@ class CommandResult:
     stderr: str
 
 
-CommandRunner = Callable[[Sequence[str], float], CommandResult]
+class CommandRunner(Protocol):
+    """Runs argv with a timeout; ``input`` (when given) is fed to stdin."""
+
+    def __call__(
+        self, argv: Sequence[str], timeout: float, input: str | None = None
+    ) -> CommandResult: ...

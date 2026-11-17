@@ -21,12 +21,15 @@ class SubprocessRunner:
             raise ValueError("child env must set HOMEBREW_NO_AUTO_UPDATE=1")
         self._env = dict(env)
 
-    def __call__(self, argv: Sequence[str], timeout: float) -> CommandResult:
+    def __call__(
+        self, argv: Sequence[str], timeout: float, input: str | None = None
+    ) -> CommandResult:
         args = list(argv)
         try:
             proc = subprocess.run(
                 args,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL if input is None else None,
+                input=input,
                 timeout=timeout,
                 shell=False,
                 capture_output=True,
