@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import stat
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -166,3 +167,64 @@ def test_partial_last_line_does_not_swallow_next_event(tmp_path, caplog):
         got = a.events_for("b")
     assert [e.package for e in got] == ["b"]
     assert "corrupt" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password: " + TAIL,
+        "token: " + TAIL,
+        '{"password": "' + TAIL + '"}',
+        '{"token":"' + TAIL + '"}',
+        "API_KEY: " + TAIL,
+        "api key: " + TAIL,
+        "secret: " + TAIL,
+        "api_key=" + TAIL,
+    ],
+)
+def test_redacts_colon_and_json_forms(text):
+    out = redact(text)
+    assert TAIL not in out and "***REDACTED***" in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the API key rotation is due",
+        "invalid token in cache",
+        "api key is rotated weekly",
+        "password policy updated",
+    ],
+)
+def test_prose_untouched(text):
+    assert redact(text) == text
+
+
+def test_truncated_multibyte_tail_does_not_crash_read(tmp_path, caplog):
+    path = tmp_path / "audit.jsonl"
+    a = JsonlAudit(path)
+    a.record(ev("p", reasoning="intact"))
+    with open(path, "ab") as fh:
+        fh.write(b'{"run_id": "r1", "reasoning": "caf\xc3')
+    with caplog.at_level(logging.WARNING):
+        got = a.events_for("p")
+    assert [e.reasoning for e in got] == ["intact"]
+    assert "corrupt" in caplog.text
+
+
+def test_loose_existing_file_is_tightened(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    path.write_text("")
+    path.chmod(0o644)
+    JsonlAudit(path).record(ev("p"))
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_new_file_never_looser_than_0600(tmp_path):
+    old = os.umask(0)
+    try:
+        path = tmp_path / "audit.jsonl"
+        JsonlAudit(path).record(ev("p"))
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600

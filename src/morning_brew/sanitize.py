@@ -10,16 +10,17 @@ import re
 REDACTED = "***REDACTED***"
 
 _SENSITIVE_PATTERNS = [
-    re.compile(r"(password\s*=\s*)(\S+)", re.IGNORECASE),
-    re.compile(r"(secret\s*=\s*)(\S+)", re.IGNORECASE),
-    re.compile(r"(api[_\s-]?key\s*=?\s*)(\S+)", re.IGNORECASE),
+    # keyword secrets: optional quotes, REQUIRED [:=] separator (prose is untouched)
+    re.compile(
+        r"([\"']?(?:password|secret|token|api[_\s-]?key)[\"']?\s*[:=]\s*[\"']?)([^\s\"',]+)",
+        re.IGNORECASE,
+    ),
     re.compile(r"(AWS_SECRET\S*\s*=?\s*)(\S+)", re.IGNORECASE),
     re.compile(r"(AWS_SESSION_TOKEN\s*=?\s*)(\S+)", re.IGNORECASE),
     re.compile(r"(ANTHROPIC_API_KEY\s*=?\s*)(\S+)", re.IGNORECASE),
     re.compile(r"(Bearer\s+)(\S+)", re.IGNORECASE),
     re.compile(r"(sk-ant-\S{4})\S+", re.IGNORECASE),
     re.compile(r"(xoxb-\S{4})\S+", re.IGNORECASE),
-    re.compile(r"(token\s*=\s*)(\S+)", re.IGNORECASE),
     re.compile(r"(ghp_)\S+", re.IGNORECASE),
     re.compile(r"(github_pat_)\S+", re.IGNORECASE),
     # URL-embedded credentials (user:password@host); the @ is kept via lookahead.

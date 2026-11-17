@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import stat
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -85,13 +86,13 @@ class JsonlAudit:
         )
         line = json.dumps(_to_dict(safe), sort_keys=False, ensure_ascii=False) + "\n"
         self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        created = not self._path.exists()
-        if not created and not self._ends_with_newline():
-            line = "\n" + line  # isolate a partial line left by an interrupted append
-        with open(self._path, "a", encoding="utf-8") as fh:
-            if created:
-                os.fchmod(fh.fileno(), 0o600)
-            fh.write(line)
+        fd = os.open(self._path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "ab") as fh:
+            if stat.S_IMODE(os.fstat(fd).st_mode) & 0o077:
+                os.fchmod(fd, 0o600)
+            if not self._ends_with_newline():
+                fh.write(b"\n")  # isolate a partial line left by an interrupted append
+            fh.write(line.encode("utf-8"))
             fh.flush()
 
     def _ends_with_newline(self) -> bool:
@@ -108,23 +109,20 @@ class JsonlAudit:
     def events_for(self, package: str) -> list[AuditEvent]:
         """Return events for ``package`` in append (file) order."""
         try:
-            fh = open(self._path, encoding="utf-8")  # noqa: SIM115
+            data = self._path.read_bytes()
         except FileNotFoundError:
             return []
         out: list[AuditEvent] = []
-        with fh:
-            for lineno, line in enumerate(fh, start=1):
-                if not line.strip():
+        for lineno, chunk in enumerate(data.split(b"\n"), start=1):
+            if not chunk.strip():
+                continue
+            try:
+                raw = json.loads(chunk.decode("utf-8"))
+                if not isinstance(raw, dict):
+                    raise TypeError("not an object")
+                if raw.get("package") != package:
                     continue
-                try:
-                    raw = json.loads(line)
-                    if not isinstance(raw, dict):
-                        raise TypeError("not an object")
-                    if raw.get("package") != package:
-                        continue
-                    out.append(_from_dict(raw))
-                except (ValueError, KeyError, TypeError, IndexError):
-                    log.warning(
-                        "skipping corrupt audit line %d in %s", lineno, self._path
-                    )
+                out.append(_from_dict(raw))
+            except (ValueError, KeyError, TypeError, IndexError):
+                log.warning("skipping corrupt audit line %d in %s", lineno, self._path)
         return out
