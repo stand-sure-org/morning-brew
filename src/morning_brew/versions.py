@@ -1,4 +1,4 @@
-"""Version classifier: (installed, current) strings to a Bump class. Pure, never raises."""
+"""Version classifier: (installed, current) to a Bump class. Never raises."""
 
 import re
 from collections.abc import Sequence
