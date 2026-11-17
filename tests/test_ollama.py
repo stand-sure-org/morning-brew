@@ -155,7 +155,7 @@ def test_missing_message_is_invalid():
         http_error(503),
     ],
 )
-def test_connection_failures_are_unavailable(exc: BaseException):
+def test_connection_error_is_unavailable(exc: BaseException):
     opener = FakeOpener([exc])
     with pytest.raises(ModelUnavailable):
         client(opener).assess(PROMPT)
