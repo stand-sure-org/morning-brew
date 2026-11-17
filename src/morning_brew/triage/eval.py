@@ -5,6 +5,7 @@ refused until an eval over the labelled corpus recorded zero false approves on
 every case expected to be held.
 """
 
+import hashlib
 import json
 import logging
 from collections.abc import Sequence
@@ -53,6 +54,7 @@ class EvalReport:
     total: int
     false_approves: tuple[str, ...]
     missed_upgrades: tuple[str, ...]
+    inconclusive: tuple[str, ...] = ()
 
 
 def load_cases(path: Path | None = None) -> list[GoldenCase]:
@@ -84,6 +86,8 @@ def load_cases(path: Path | None = None) -> list[GoldenCase]:
 
 def effective_verdict(o: TriageOutcome) -> str:
     """What the chain would do: shadow outcomes carry it in ``would_be``."""
+    if "upgrade" in (o.kind, o.would_be):
+        return "upgrade"
     return o.would_be or o.kind
 
 
@@ -100,6 +104,7 @@ def run_eval(
     ts = now or datetime.now().astimezone()
     false_approves: list[str] = []
     missed: list[str] = []
+    inconclusive: list[str] = []
     for c in cases:
         request = TriageRequest(
             full_name=f"golden/{c.id}",
@@ -125,60 +130,71 @@ def run_eval(
                 reasoning=outcome.reasoning,
             )
         )
-        if c.expected == "hold" and verdict == "upgrade":
+        if verdict == "transient":
+            inconclusive.append(c.id)
+            if c.expected == "upgrade":
+                missed.append(c.id)
+        elif c.expected == "hold" and verdict == "upgrade":
             false_approves.append(c.id)
         elif c.expected == "upgrade" and verdict != "upgrade":
             missed.append(c.id)
-    return EvalReport(len(cases), tuple(false_approves), tuple(missed))
+    return EvalReport(
+        len(cases), tuple(false_approves), tuple(missed), tuple(inconclusive)
+    )
 
 
 def gate_passed(report: EvalReport, cases: Sequence[GoldenCase]) -> bool:
-    """Zero false approves on every case expected to be held.
+    """Zero false approves over the complete shipped, fully labelled corpus.
 
-    Fails closed: unlabeled cases, or a report that does not cover the cases,
-    never pass.
+    Fails closed: a subset or different corpus, unlabeled cases, a report that
+    does not cover the cases, any false approve, or any inconclusive (model
+    unavailable) case never passes.
     """
+    ids = [c.id for c in cases]
+    if len(set(ids)) != len(ids) or set(ids) != {c.id for c in load_cases()}:
+        return False
     if any(c.expected is None for c in cases) or report.total != len(cases):
         return False
-    held = {c.id for c in cases if c.expected == "hold"}
-    return not held.intersection(report.false_approves)
+    return not report.false_approves and not report.inconclusive
 
 
 def eval_exit_code(report: EvalReport, cases: Sequence[GoldenCase]) -> int:
     return 0 if gate_passed(report, cases) else 1
 
 
+def corpus_sha256() -> str:
+    data = (
+        resources.files("morning_brew.triage")
+        .joinpath("golden/cases.jsonl")
+        .read_bytes()
+    )
+    return hashlib.sha256(data).hexdigest()
+
+
 class GateStore:
     def __init__(self, path: Path) -> None:
         self._path = path
 
-    def record(
-        self,
-        report: EvalReport,
-        now: datetime,
-        cases: Sequence[GoldenCase] | None = None,
-    ) -> None:
-        # run_eval only reports false approves for cases expected to be held,
-        # so without the corpus "no false approves over a non-empty run" is
-        # the same test as gate_passed.
-        passed = (
-            gate_passed(report, cases)
-            if cases is not None
-            else report.total > 0 and not report.false_approves
-        )
+    def record(self, report: EvalReport, now: datetime) -> None:
         write_json_atomic(
             self._path,
             {
-                "passed": passed,
+                "passed": gate_passed(report, load_cases()),
                 "ts": now.isoformat(),
                 "total": report.total,
                 "false_approves": len(report.false_approves),
+                "inconclusive": len(report.inconclusive),
+                "corpus_sha256": corpus_sha256(),
             },
         )
 
     def passed(self) -> bool:
         data = read_json_or_none(self._path)
-        return isinstance(data, dict) and data.get("passed") is True
+        return (
+            isinstance(data, dict)
+            and data.get("passed") is True
+            and data.get("corpus_sha256") == corpus_sha256()
+        )
 
 
 def require_gate(config: Config, gate: GateStore) -> None:

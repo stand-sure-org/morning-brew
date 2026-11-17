@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import morning_brew.triage.eval as eval_mod
 from fakes import FakeAudit
 from morning_brew.config import Config
 from morning_brew.domain import (
@@ -16,6 +17,7 @@ from morning_brew.domain import (
     UnlabeledCases,
 )
 from morning_brew.triage.eval import (
+    EvalReport,
     GateStore,
     GoldenCase,
     effective_verdict,
@@ -137,19 +139,28 @@ def test_false_approve_on_owner_labeled_real_hold_fails_gate() -> None:
 def test_approving_an_owner_labeled_upgrade_is_not_a_false_approve() -> None:
     cs = [GoldenCase("r", "real", "fine", "upgrade", Bump.MINOR, "homebrew/core")]
     r = run_eval(approve_all(), cs, FakeAudit([]), "r")
-    assert gate_passed(r, cs) and not r.missed_upgrades
+    assert not r.false_approves and not r.missed_upgrades
 
 
-def test_transient_is_not_an_approve() -> None:
-    cs = [GoldenCase("r", "injection", "x", "hold", Bump.MINOR, "homebrew/core")]
+def test_all_transient_run_does_not_pass(tmp_path: Path) -> None:
+    cs = labeled()
     r = run_eval(Fixed("transient", []), cs, FakeAudit([]), "r")
-    assert gate_passed(r, cs)
+    assert len(r.inconclusive) == len(cs)
+    assert not gate_passed(r, cs)
+    assert eval_exit_code(r, cs) == 1
+    g = GateStore(tmp_path / "g.json")
+    g.record(r, NOW)
+    assert not g.passed()
 
 
 def test_shadow_would_be_counts_as_approve() -> None:
     o = TriageOutcome("transient", "shadow", "chain", would_be="upgrade")
     assert effective_verdict(o) == "upgrade"
     assert effective_verdict(TriageOutcome("hold", "r", "chain")) == "hold"
+    assert (
+        effective_verdict(TriageOutcome("upgrade", "r", "chain", would_be="hold"))
+        == "upgrade"
+    )
 
 
 def test_shadow_would_be_upgrade_is_false_approve() -> None:
@@ -199,15 +210,18 @@ def test_live_mode_requires_recorded_pass(tmp_path: Path) -> None:
     require_gate(Config(chain_mode="shadow"), GateStore(tmp_path / "g.json"))
 
 
-def test_gate_store_records_pass_and_fail(tmp_path: Path) -> None:
+def test_gate_store_records_pass_and_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cs = labeled()
+    monkeypatch.setattr(eval_mod, "load_cases", lambda path=None: list(cs))
     g = GateStore(tmp_path / "g.json")
     assert not g.passed()
-    g.record(run_eval(approve_all(), cs, FakeAudit([]), "r"), NOW, cs)
+    g.record(run_eval(approve_all(), cs, FakeAudit([]), "r"), NOW)
     assert not g.passed()
     with pytest.raises(GateNotPassed):
         require_gate(Config(chain_mode="live"), g)
-    g.record(run_eval(hold_all(), cs, FakeAudit([]), "r"), NOW, cs)
+    g.record(run_eval(hold_all(), cs, FakeAudit([]), "r"), NOW)
     data = json.loads((tmp_path / "g.json").read_text())
     assert data["passed"] is True and data["total"] == len(cs)
     assert data["false_approves"] == 0 and "ts" in data
@@ -221,3 +235,52 @@ def test_gate_store_corrupt_is_not_passed(tmp_path: Path) -> None:
     assert not GateStore(p).passed()
     p.write_text('{"passed": "yes"}')
     assert not GateStore(p).passed()
+
+
+def _patch_corpus(monkeypatch: pytest.MonkeyPatch) -> list[GoldenCase]:
+    cs = labeled()
+    monkeypatch.setattr(eval_mod, "load_cases", lambda path=None: list(cs))
+    return cs
+
+
+def test_record_with_handmade_report_never_passes(tmp_path: Path) -> None:
+    g = GateStore(tmp_path / "g.json")
+    g.record(EvalReport(1, (), ()), NOW)
+    assert not g.passed()
+
+
+def test_record_on_unlabeled_shipped_corpus_never_passes(tmp_path: Path) -> None:
+    g = GateStore(tmp_path / "g.json")
+    g.record(EvalReport(len(load_cases()), (), ()), NOW)
+    assert not g.passed()
+
+
+def test_subset_corpus_never_passes() -> None:
+    cs = [c for c in labeled() if c.subset != "real"]
+    r = run_eval(hold_all(), cs, FakeAudit([]), "r")
+    assert not r.false_approves and not gate_passed(r, cs)
+
+
+def test_full_labeled_all_hold_correct_run_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cs = _patch_corpus(monkeypatch)
+    g = GateStore(tmp_path / "g.json")
+    g.record(run_eval(hold_all(), cs, FakeAudit([]), "r"), NOW)
+    assert g.passed()
+    require_gate(Config(chain_mode="live"), g)
+
+
+def test_stale_corpus_hash_invalidates_recorded_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cs = _patch_corpus(monkeypatch)
+    g = GateStore(tmp_path / "g.json")
+    g.record(run_eval(hold_all(), cs, FakeAudit([]), "r"), NOW)
+    data = json.loads((tmp_path / "g.json").read_text())
+    data["corpus_sha256"] = "0" * 64
+    (tmp_path / "g.json").write_text(json.dumps(data))
+    assert not g.passed()
+    del data["corpus_sha256"]
+    (tmp_path / "g.json").write_text(json.dumps(data))
+    assert not g.passed()
