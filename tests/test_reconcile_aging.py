@@ -27,8 +27,16 @@ from morning_brew.aging import (
     render_digest,
     stale_holds,
 )
+from morning_brew.caveats import caveat_hash
 from morning_brew.config import Config
-from morning_brew.domain import Decision, Hold, HoldKind, TriageOutcome, Verdict
+from morning_brew.domain import (
+    Decision,
+    Hold,
+    HoldKind,
+    TriageOutcome,
+    UpgradeResult,
+    Verdict,
+)
 from morning_brew.orchestrator import run_once
 from morning_brew.ports import Ports
 from morning_brew.reconcile import reconcile
@@ -78,21 +86,33 @@ def ports_with(
     current: Mapping[str, str],
     rules_say_eligible: Iterable[str] = (),
     grey: Iterable[str] = (),
+    defer: Iterable[str] = (),
+    caveats: Mapping[str, str] | None = None,
     groups: list[list[str]] | None = None,
     triage_outcomes: Mapping[str, TriageOutcome] | None = None,
 ) -> tuple[Ports, list[str]]:
     calls: list[str] = []
-    snap = make_snapshot(*(make_candidate(n, current=v) for n, v in current.items()))
+    caveats = caveats or {}
+    snap = make_snapshot(
+        *(
+            make_candidate(n, current=v, caveats=caveats.get(n))
+            for n, v in current.items()
+        )
+    )
     # Every candidate not named GREY gets an ELIGIBLE rule decision;
     # ``rules_say_eligible`` names that intent explicitly at call sites.
     grey = set(grey)
     assert grey.isdisjoint(rules_say_eligible)
-    decisions = [
-        Decision(n, Verdict.GREY, "R11", "caveat changed")
-        if n in grey
-        else Decision(n, Verdict.ELIGIBLE, "R12", "clean")
-        for n in current
-    ]
+    defer = set(defer)
+
+    def rule_decision(n: str) -> Decision:
+        if n in grey:
+            return Decision(n, Verdict.GREY, "R11", "caveat changed")
+        if n in defer:
+            return Decision(n, Verdict.DEFER, "R09", "live process")
+        return Decision(n, Verdict.ELIGIBLE, "R12", "clean")
+
+    decisions = [rule_decision(n) for n in current]
     outcomes = triage_outcomes or {
         n: TriageOutcome("hold", "migration", "claude") for n in grey
     }
@@ -341,3 +361,98 @@ def test_stale_threshold_comes_from_config() -> None:
     r = run_once(ports, Config(stale_hold_days=60))
     assert r.summary.anomalies == ()
     assert ports.notifier.sent[-1][1] is False
+
+
+# --- fix round 1 ------------------------------------------------------------
+
+
+def test_leftover_transient_row_is_released_when_not_held_this_run() -> None:
+    ports, _ = ports_with(
+        existing_holds=[
+            transient("t", held_at_version="1.0"),
+            decided("d", held_at_version="1.0", age=5, reason="data migration"),
+        ],
+        current={"t": "1.0", "d": "1.0"},
+        defer={"t", "d"},
+    )
+    r = run_once(ports, Config())
+    assert r.summary.transient == 0 and r.summary.quality == "full"
+    assert ports.holds.get("t") is None
+    kept = ports.holds.get("d")  # a DECIDED row survives a DEFER run intact
+    assert kept is not None and kept.reason == "data migration"
+    assert kept.first_held == NOW - timedelta(days=5)
+
+
+def test_summary_transient_is_this_runs_count() -> None:
+    ports, _ = ports_with(
+        existing_holds=[transient("t", held_at_version="1.0")],
+        current={"t": "1.0"},
+        defer={"t"},
+    )
+    run_once(ports, Config(), dry_run=True)  # dry run keeps the ledger row
+    r = run_once(ports, Config(), dry_run=True)
+    assert ports.holds.get("t") is not None
+    assert r.summary.transient == 0
+
+
+def test_transient_turned_decided_restarts_age() -> None:  # FR-061
+    ports, _ = ports_with(
+        existing_holds=[transient("g", held_at_version="1.0", age=40)],
+        current={"g": "1.0"},
+        grey={"g"},
+    )
+    r = run_once(ports, Config())
+    h = ports.holds.get("g")
+    assert h.kind is HoldKind.DECIDED and h.first_held == NOW
+    assert r.summary.oldest_decided_hold_days == 0
+    assert not any("stale" in line for line in r.summary.anomalies)
+
+
+def test_decided_hold_keeps_first_held_across_runs() -> None:
+    ports, _ = ports_with(
+        existing_holds=[decided("g", held_at_version="0.9", age=5)],
+        current={"g": "1.0"},
+        grey={"g"},
+    )
+    run_once(ports, Config())
+    assert ports.holds.get("g").first_held == NOW - timedelta(days=5)
+
+
+def _caveat_ports(**kw):  # noqa: ANN003, ANN202
+    return ports_with(
+        current={"c": "1.0"},
+        grey={"c"},
+        caveats={"c": "restart  the\nservice"},
+        triage_outcomes={"c": TriageOutcome("upgrade", "ok", "claude")},
+        **kw,
+    )
+
+
+def test_successful_upgrade_records_caveat_hash() -> None:  # R32
+    ports, calls = _caveat_ports()
+    run_once(ports, Config())
+    assert "brew.upgrade:c" in calls
+    assert ports.seen.hashes == {"c": caveat_hash("restart the service")}
+
+
+def test_upgrade_without_caveat_records_no_hash() -> None:  # R32
+    ports, calls = ports_with(current={"a": "1.0"})
+    run_once(ports, Config())
+    assert "brew.upgrade:a" in calls and ports.seen.hashes == {}
+
+
+def test_failed_upgrade_and_dry_run_record_no_caveat_hash() -> None:  # R32
+    ports, calls = _caveat_ports()
+    ports.brew.upgrade_results = {"c": UpgradeResult(ok=False, stderr_tail="boom")}
+    run_once(ports, Config())
+    assert "brew.upgrade:c" in calls and ports.seen.hashes == {}
+    ports, _ = _caveat_ports()
+    run_once(ports, Config(), dry_run=True)
+    assert ports.seen.hashes == {}
+
+
+def test_busy_upgrade_records_no_caveat_hash() -> None:  # R32
+    ports, _ = _caveat_ports()
+    ports.brew.busy_on = frozenset({"c"})
+    run_once(ports, Config())
+    assert ports.seen.hashes == {}

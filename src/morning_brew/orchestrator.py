@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from morning_brew.aging import hold_aging, stale_holds
+from morning_brew.caveats import caveat_hash
 from morning_brew.config import Config
 from morning_brew.domain import (
     EXIT_ERROR,
@@ -139,6 +140,8 @@ def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
     _store_busy(ports, applied, candidates, now)
     for name in applied.upgraded:  # no longer outdated
         ports.holds.release(name)
+    _release_stale_transients(ports, decisions, applied)
+    _record_caveat_hashes(ports, applied, candidates)
     if applied.upgraded:
         ports.seen.record_upgrade(current_seq + 1, applied.upgraded)
     post = ports.brew.snapshot()
@@ -221,6 +224,34 @@ def _release_not_outdated(ports: Ports, candidates: Mapping[str, Candidate]) -> 
         if hold.name not in candidates:
             log.info("releasing hold for %s: no longer outdated", hold.name)
             ports.holds.release(hold.name)
+
+
+def _release_stale_transients(
+    ports: Ports, decisions: Sequence[Decision], applied: _Applied
+) -> None:
+    """[FR-061] A transient row lives one run: retried, it is held, busy or gone.
+
+    DECIDED rows are kept (their reason and first_held must survive a DEFER).
+    """
+    held = {d.full_name for d in decisions if d.verdict is Verdict.HOLD}
+    busy = set(applied.busy)
+    for hold in ports.holds.list_all():
+        if hold.kind is not HoldKind.TRANSIENT:
+            continue
+        if hold.name in held or hold.name in busy:
+            continue
+        ports.holds.release(hold.name)
+
+
+def _record_caveat_hashes(
+    ports: Ports, applied: _Applied, candidates: Mapping[str, Candidate]
+) -> None:
+    """[R32] After a successful upgrade the caveat seen is no longer news."""
+    for name in applied.upgraded:
+        candidate = candidates.get(name)
+        h = caveat_hash(candidate.caveats) if candidate is not None else None
+        if h is not None:
+            ports.seen.record_caveat_hash(name, h)
 
 
 def _apply_existing_holds(
@@ -307,12 +338,15 @@ def _store_holds(
         outcome = outcomes.get(d.full_name)
         existing = ports.holds.get(d.full_name)
         if existing is not None:
+            # [FR-061] transient time never counts toward decided age
+            restarted = existing.kind is HoldKind.TRANSIENT and kind is HoldKind.DECIDED
             hold = replace(
                 existing,
                 kind=kind,
                 held_at_version=version,
                 reason=d.reason,
                 blocked_by=blocked_by,
+                first_held=now if restarted else existing.first_held,
             )
             if outcome is not None:
                 hold = replace(hold, model_reasoning=outcome.reasoning)
@@ -509,7 +543,7 @@ def _summary(
         decided_holds=aging.decided_count,
         oldest_decided_hold_days=aging.oldest_decided_days,
         blocked_by_dep=aging.blocked_by_dep_count,
-        transient=aging.transient_count,
+        transient=transient,
         self_dep_commands=self_dep_commands,
         disagreements=tuple(n for n, o in outcomes.items() if o.disagreement),
         live_old_binary=(),
