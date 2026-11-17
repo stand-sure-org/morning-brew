@@ -72,10 +72,8 @@ def test_unjoinable_is_reported_not_dropped():
         }
     )
     s = build_snapshot(**inputs)
-    baseline = build_snapshot(**fixture_inputs())
-    assert s.unjoinable == (*baseline.unjoinable, "ghost")
+    assert s.unjoinable == ("ghost",)
     assert all(c.full_name != "ghost" for c in s.candidates)
-    assert s.candidates == baseline.candidates
 
 
 def test_multiple_and_empty_installed_versions():
@@ -133,3 +131,13 @@ def test_pinned_and_caveats_flow_through():
         if f["caveats"] and f["full_name"] in {c.full_name for c in s.candidates}
     )
     assert by_name(s, with_caveats["full_name"]).caveats == with_caveats["caveats"]
+
+
+def test_real_fixture_has_no_unjoinable():
+    inputs = fixture_inputs()
+    s = build_snapshot(**inputs)
+    assert s.unjoinable == ()
+    expected = len(inputs["outdated"]["formulae"]) + len(inputs["outdated"]["casks"])
+    assert len(s.candidates) == expected
+    for deps in s.dep_graph.values():
+        assert set(deps) <= set(s.dep_graph)
