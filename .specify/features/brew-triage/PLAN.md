@@ -2,7 +2,7 @@
 
 **Version:** 1.2 (Implementation plan)
 **Date:** 2026-11-17
-**Changes:** Expanded the v1.1 task list into a full implementation plan: per-task files, consumed/produced interfaces with exact signatures, and test-first checkbox steps. Applies the owner's three post-approval changes (local model is a recorded second opinion only and never causes an upgrade or a hold; self-dependencies stay REPORT/DEFER with a copy-pasteable `brew upgrade -- <members>` line and no self-upgrade step; soak and caveat-hash seeding accepted as written). Task ids T00-T25 and spikes S4/S6 are unchanged from v1.1.
+**Changes:** (1.2.1) Pre-flight rulings R1–R7 folded in (see SDD ledger). Expanded the v1.1 task list into a full implementation plan: per-task files, consumed/produced interfaces with exact signatures, and test-first checkbox steps. Applies the owner's three post-approval changes (local model is a recorded second opinion only and never causes an upgrade or a hold; self-dependencies stay REPORT/DEFER with a copy-pasteable `brew upgrade -- <members>` line and no self-upgrade step; soak and caveat-hash seeding accepted as written). Task ids T00-T25 and spikes S4/S6 are unchanged from v1.1.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -127,7 +127,7 @@ def test_fixtures_contain_panel_cases():
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/test_skeleton.py -v`. Expected: FAIL (no package / fixtures).
-- [ ] **Step 3: Implement** `pyproject.toml` (extras `claude`, dev group, ruff `select` includes `T201` with `per-file-ignores` for `src/morning_brew/cli.py`, marker `integration`), the conftest, and the fixtures. Capture fixtures from the read-only commands `brew outdated --json=v2`, `brew info --json=v2 --installed`, `brew services list --json`, `brew leaves`, `brew --version`; trim `info.json` to the formulae named in the test plus their runtime dependencies and 2 casks; keep the real key names (no invented fields). Add a synthetic `rabbitmq`/`erlang` pair only if the live data no longer has them.
+- [ ] **Step 3: Implement** `pyproject.toml` (extras `claude`, dev group, ruff `select` includes `T201` with `per-file-ignores` for `src/morning_brew/cli.py`, marker `integration`), the conftest, and the fixtures. Capture fixtures from the read-only commands `brew outdated --json=v2`, `brew info --json=v2 --installed`, `brew services list --json`, `brew leaves`, `brew --version`; trim `info.json` to the formulae named in the test plus every formula/cask later tasks reference [ruling R7]: vectordotdev/brew/vector, aws-c-auth, aws-c-s3, awscli, redis, rabbitmq, erlang, jandedobbeleer/oh-my-posh/oh-my-posh, fnox, usage, grype, caddy, python@3.14, postgresql@16, one formula with an empty `bottle` (abctl if installed), casks ghostty and antigravity-cli, plus runtime dependencies of all of these; keep the real key names (no invented fields); report anything synthesized. Add a synthetic `rabbitmq`/`erlang` pair only if the live data no longer has them.
 - [ ] **Step 4: Run** `uv sync --extra claude && uv run pytest tests/test_skeleton.py -v && uv run ruff check`. Expected: PASS.
 - [ ] **Step 5: Commit**
 
@@ -171,7 +171,7 @@ class Hold: name:str; kind:HoldKind; held_at_version:str; reason:str; first_held
 @dataclass(frozen=True)
 class Stamp: last_full_success:datetime|None; last_attempt:datetime|None; quality:Literal["full","degraded"]; full_runs:int
 @dataclass(frozen=True)
-class AuditEvent: run_id:str; ts:datetime; brew_version:str; stage:str; package:str|None=None; rule_id:str|None=None; verdict:str|None=None; action_result:str|None=None; models:tuple[tuple[str,str|None],...]=(); booleans:Mapping[str,bool]|None=None; reasoning:str|None=None
+class AuditEvent: run_id:str; ts:datetime; brew_version:str; stage:str; package:str|None=None; rule_id:str|None=None; verdict:str|None=None; action_result:str|None=None; models:tuple[tuple[str,str|None],...]=(); booleans:Mapping[str,bool]|None=None; reasoning:str|None=None; component:str|None=None   # [ruling R3/R4] component id = ",".join(sorted(members)) for multi-member components, None for singletons and casks
 @dataclass(frozen=True)
 class Summary: run_id:str; quality:Literal["full","degraded"]; upgraded:tuple[str,...]; failed:tuple[str,...]; decided_holds:int; oldest_decided_hold_days:int|None; blocked_by_dep:int; transient:int; self_dep_commands:tuple[str,...]; disagreements:tuple[str,...]; live_old_binary:tuple[str,...]; anomalies:tuple[str,...]; dead_man:bool; degraded_reasons:tuple[str,...]
 @dataclass(frozen=True)
@@ -193,7 +193,8 @@ class LockPort:        acquire()->ContextManager[None]
 class StampPort:       read()->Stamp|None; write(stamp)->None
 RulesFn = Callable[[Snapshot, RuleContext], list[Decision]]
 ComponentsFn = Callable[[Snapshot, Sequence[Decision]], list[ComponentPlan]]
-@dataclass class Ports: brew; live; rules:RulesFn; components:ComponentsFn; triage; holds; seen; audit; notifier; status; lock; stamp; clock:Callable[[],datetime]
+ReconcileFn = Callable[[Snapshot, HoldStorePort], list[str]]      # [ruling R1] real impl in T12; T01 uses a recording fake
+@dataclass class Ports: brew; live; rules:RulesFn; components:ComponentsFn; reconcile:ReconcileFn; triage; holds; seen; audit; notifier; status; lock; stamp; clock:Callable[[],datetime]
 # config.py: @dataclass(frozen=True) Config with defaults from Global Constraints plus
 #   trusted_taps:frozenset[str]=frozenset(); chain_mode:Literal["shadow","live"]="shadow"; local_model="qwen3:4b"; local_digest:str|None=None
 #   claude_model="claude-sonnet-5-5"; claude_effort="low"; claude_key_name="ANTHROPIC_API_KEY"; stale_hold_days=14; quiet_hours=(22,7); state_dir:Path
@@ -210,7 +211,7 @@ Decisions made here (spec silent): the orchestrator builds components first, tri
 ```python
 def test_call_order_and_explicit_upgrades():
     result = run_once(ports, Config())
-    assert calls == ["lock","reconcile","brew.update","brew.snapshot","brew.cleanup","rules",
+    assert calls == ["lock","brew.update","brew.snapshot","reconcile","brew.cleanup","rules",
                      "components","triage:grype","components",
                      "brew.upgrade:a","brew.upgrade:b,c","brew.upgrade:grype","brew.snapshot",
                      "audit","notify","stamp.write"]
@@ -312,7 +313,7 @@ class FileStampStore(StampPort): __init__(self, path: Path)
 class FileLock(LockPort): __init__(self, path: Path)          # fcntl.flock, non-blocking, raises LockHeld
 ```
 
-Decisions made here: "day" is the local calendar date of tz-aware `now`; dry-run skips `brew update`, `upgrade`, `cleanup`, and all state writes except an audit event with `stage="dry_run"`.
+Decisions made here: "day" is the local calendar date of tz-aware `now`; dry-run skips `brew update`, `upgrade`, `cleanup`, and all state writes except audit events with `stage="dry_run"`. [ruling R2] A dry run bypasses `should_run` (it is an explicit request; dead_man is still computed for the summary, no notification is sent). [ruling R3] Every run, dry or real, audits one event per package decision (`stage` "decide" or "dry_run") with the final verdict (component status after blocking), the member's own `rule_id` (or `"chain"` when triage decided), and `component`; `explain` reads the latest run's event. Add `test_dry_run_bypasses_gate_and_audits_each_decision`.
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -553,7 +554,7 @@ def test_no_model_outcome_changes_non_grey(verdict, kind):          # FR-053
 **Files:** Create `src/morning_brew/liveprocess.py`, `tests/test_liveprocess.py`
 
 **Interfaces:**
-- Consumes: `Snapshot` (uses `services`, `dep_graph`, `installed_names`, `candidates[].full_name`), `CommandRunner` signature from T15 (`Callable[[Sequence[str], float], CommandResult]`; define `CommandResult(returncode:int, stdout:str, stderr:str)` in `domain.py` here if T15 has not).
+- Consumes: `Snapshot` (uses `services`, `dep_graph`, `installed_names`, `candidates[].full_name`), `CommandRunner` signature (`Callable[[Sequence[str], float], CommandResult]`) — [ruling R5] this task defines `CommandResult(returncode:int, stdout:str, stderr:str)` and `CommandRunner` in `domain.py`; T15 imports them.
 - Produces:
 
 ```python
@@ -710,7 +711,7 @@ def tail_redacted(text: str, limit: int = 2000) -> str
 class JsonlAudit(AuditPort): __init__(self, path: Path); record(event); events_for(package) -> list[AuditEvent]
 ```
 
-Header comment credits `/Volumes/Repos/phlegyas/phlegyas/sanitize.py` as the origin (vendored, not imported). JSON keys exactly: `run_id, ts, brew_version, stage, package, rule_id, verdict, action_result, models, booleans, reasoning`.
+Header comment credits `/Volumes/Repos/phlegyas/phlegyas/sanitize.py` as the origin (vendored, not imported). JSON keys exactly: `run_id, ts, brew_version, stage, package, rule_id, verdict, action_result, models, booleans, reasoning, component` [ruling R3].
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -776,8 +777,7 @@ def test_self_deps(): assert detect_self_deps(Path("/opt/homebrew/Cellar/python@
 - Produces:
 
 ```python
-@dataclass(frozen=True) class CommandResult: returncode:int; stdout:str; stderr:str      # if not already in domain.py (T09)
-CommandRunner = Callable[[Sequence[str], float], CommandResult]
+# CommandResult and CommandRunner are imported from domain.py (defined in T09) [ruling R5]
 class SubprocessRunner: __init__(self, env: Mapping[str, str]); __call__(self, argv, timeout) -> CommandResult   # shell=False, stdin=DEVNULL
 def parse_dry_run(stdout: str) -> frozenset[str]            # names from lines "<name> <old> -> <new>" after a "Would upgrade" header
 class BrewCli(BrewPort): __init__(self, runner: CommandRunner, brew: str = "/opt/homebrew/bin/brew", sleep: Callable[[float], None] = time.sleep)
@@ -852,7 +852,7 @@ def test_live_mode_requires_recorded_pass(tmp_path):
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/test_eval.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** the module; write `cases.jsonl` (real caveats extracted from `info.json` fixture; leave `expected` null for those until the owner labels them, and let `test_corpus_shape` accept nulls while `run_eval` rejects them).
+- [ ] **Step 3: Implement** the module; write `cases.jsonl` [ruling R6]: the 10 real cases copy caveat text verbatim from `.specify/features/brew-triage/golden-real-caveats.md` (R01–R10, ids `real-R01`…), `expected` null until the owner ticks; add `test_real_cases_match_owner_sheet` asserting each real caveat equals the sheet's code block; `test_corpus_shape` accepts nulls while `run_eval` rejects them.
 - [ ] **Step 4: Run** the same command. Expected: PASS.
 - [ ] **Step 5: Commit** `git commit --no-gpg-sign -m "feat(eval): golden set, eval runner, ship-gate guard"`.
 

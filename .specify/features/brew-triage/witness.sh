@@ -82,8 +82,13 @@ check_invariants() {   # PLAN Global Constraints, enforced statically on src/
       ctx="$(sed -n "${l},$((l+8))p" "$f")"
       printf '%s' "$ctx" | grep -q 'timeout' && printf '%s' "$ctx" | grep -q 'stdin' || echo "$f:$l"; done)"
   [ -z "$bad" ] && pass "subprocess calls carry timeout= and stdin=" || fail "subprocess without timeout/stdin: $bad"
-  grep -qE '^\s*anthropic' pyproject.toml && ! awk '/^dependencies\s*=/,/\]/' pyproject.toml | grep -q anthropic \
-    && pass "anthropic only in optional extra" || fail "anthropic missing or in core dependencies"
+  python3 -I -c '
+import sys, tomllib
+p = tomllib.load(open("pyproject.toml", "rb"))["project"]
+core = any("anthropic" in d for d in p.get("dependencies", []))
+extra = any("anthropic" in d for d in p.get("optional-dependencies", {}).get("claude", []))
+sys.exit(0 if extra and not core else 1)' 2>/dev/null \
+    && pass "anthropic only in optional extra [claude]" || fail "anthropic missing from extra [claude] or present in core dependencies"
   command -v gitleaks >/dev/null && { gitleaks git --log-opts="main..HEAD" --redact --no-banner -l error >/dev/null 2>&1 \
     && pass "gitleaks clean on main..HEAD" || fail "gitleaks findings on main..HEAD"; }
 }
