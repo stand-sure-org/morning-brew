@@ -236,6 +236,10 @@ class GateNotPassed(Exception):
     """The ship gate has not been passed; live chain mode is refused."""
 
 
+class UnlabeledCases(Exception):
+    """The golden corpus has cases the owner has not labelled yet."""
+
+
 class ConfigError(Exception):
     """The config file is invalid."""
 
