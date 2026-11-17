@@ -9,6 +9,7 @@ bodies are untrusted and are never logged; only statuses and exception type
 names are.
 """
 
+import http.client
 import json
 import logging
 import re
@@ -34,6 +35,7 @@ log = logging.getLogger(__name__)
 
 PORT = 11434
 CALL_TIMEOUT = 120
+MAX_BODY = 1_048_576
 LSOF_TIMEOUT = 10
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _LISTENER_ADDR = re.compile(r"(\S+):%d\b" % PORT)
@@ -120,18 +122,26 @@ class OllamaClient:
         )
         try:
             with self._opener(request, timeout=CALL_TIMEOUT) as resp:
-                raw = resp.read()
+                raw = resp.read(MAX_BODY + 1)
         except urllib.error.HTTPError as exc:
             log.warning("ollama %s: HTTP %s", path, exc.code)
             if 400 <= exc.code < 500:
                 raise _Rejected(f"ollama rejected request: HTTP {exc.code}") from exc
             raise ModelUnavailable(f"ollama HTTP {exc.code}") from exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            http.client.HTTPException,
+        ) as exc:
             log.warning("ollama %s: %s", path, type(exc).__name__)
             raise ModelUnavailable(f"ollama unreachable: {type(exc).__name__}") from exc
+        if len(raw) > MAX_BODY:
+            raise ModelInvalidOutput("ollama response too large")
         try:
             body = json.loads(raw)
-        except (ValueError, UnicodeDecodeError) as exc:
+        except (ValueError, UnicodeDecodeError, RecursionError) as exc:
             raise ModelInvalidOutput("ollama response is not JSON") from exc
         if not isinstance(body, dict):
             raise ModelInvalidOutput("ollama response is not an object")
@@ -170,7 +180,9 @@ class OllamaClient:
         return OllamaStatus(up=True, digest_ok=ok, off_loopback=off)
 
     def assess(self, prompt: Prompt) -> RiskAssessment:
-        if self._expected is not None and not self._digest_matches():
+        if self._expected is None:
+            raise ModelUnavailable("digest not pinned")
+        if not self._digest_matches():
             raise ModelUnavailable("digest mismatch")
         payload = {
             "model": self._model,

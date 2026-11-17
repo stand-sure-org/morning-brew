@@ -1,11 +1,14 @@
 """T19: loopback-only, digest-pinned Ollama client (FR-051, FR-055)."""
 
+import email.message
+import http.client
 import io
 import json
 import logging
 import os
 import urllib.error
 import urllib.request
+import urllib.response
 from typing import Any
 
 import pytest
@@ -36,8 +39,8 @@ class _Resp:
     def __init__(self, body: bytes):
         self._body = body
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
 
     def __enter__(self) -> "_Resp":
         return self
@@ -227,12 +230,78 @@ def test_digest_checked_once_per_instance():
     assert opener.tags_calls == 1
 
 
-def test_no_expected_digest_skips_pin_but_reports_not_ok():
+def test_no_expected_digest_fails_closed():
     opener = FakeOpener([chat_body(json.dumps(GOOD))])
     c = client(opener, digest=None)
-    assert c.check_available().up is True
-    assert c.check_available().digest_ok is False
-    assert c.assess(PROMPT).verdict == "upgrade"
+    status = c.check_available()
+    assert status.up is True and status.digest_ok is False
+    with pytest.raises(ModelUnavailable, match="digest not pinned"):
+        c.assess(PROMPT)
+    assert opener.chat_calls == 0
+
+
+class _BrokenResp(_Resp):
+    def __init__(self, exc: BaseException):
+        super().__init__(b"")
+        self._exc = exc
+
+    def read(self, n: int = -1) -> bytes:
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        http.client.IncompleteRead(b"par"),
+        http.client.BadStatusLine("x"),
+        http.client.LineTooLong("status line"),
+    ],
+)
+def test_http_client_errors_are_unavailable(exc: BaseException):
+    class Opener(FakeOpener):
+        def __call__(self, request: Any, timeout: float = 0) -> _Resp:
+            if request.full_url.endswith("/api/tags"):
+                return super().__call__(request, timeout)
+            return _BrokenResp(exc)
+
+    with pytest.raises(ModelUnavailable):
+        client(Opener([])).assess(PROMPT)
+    broken = OllamaClient(
+        "qwen3:4b", DIGEST, opener=lambda r, timeout=0: _BrokenResp(exc)
+    )
+    assert broken.check_available().up is False
+
+
+def test_deeply_nested_json_is_invalid_output():
+    opener = FakeOpener([b"[" * 200000] * 2)
+    with pytest.raises(ModelInvalidOutput):
+        client(opener).assess(PROMPT)
+
+
+def test_oversized_body_is_invalid_output():
+    opener = FakeOpener([b" " * (1_048_576 + 1)] * 2)
+    with pytest.raises(ModelInvalidOutput):
+        client(opener).assess(PROMPT)
+
+
+def test_redirect_is_not_followed(monkeypatch: pytest.MonkeyPatch):
+    hits: list[str] = []
+
+    class Fake302(urllib.request.HTTPHandler):
+        def http_open(self, req: urllib.request.Request) -> Any:
+            hits.append(req.full_url)
+            msg = email.message.Message()
+            msg["Location"] = "http://evil.example/x"
+            resp = urllib.response.addinfourl(io.BytesIO(b""), msg, req.full_url, 302)
+            resp.msg = "Found"  # type: ignore[attr-defined]
+            return resp
+
+    real = urllib.request.build_opener
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *h: real(*h, Fake302()))
+    c = OllamaClient("qwen3:4b", DIGEST)
+    with pytest.raises(ModelUnavailable):
+        c.assess(PROMPT)
+    assert hits == ["http://127.0.0.1:11434/api/tags"]
 
 
 def test_check_available_down_when_tags_unreachable():
