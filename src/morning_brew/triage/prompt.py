@@ -13,7 +13,7 @@ from morning_brew.components import validate_name
 from morning_brew.domain import InvalidPackageName, TriageRequest
 from morning_brew.sanitize import redact
 from morning_brew.textsafe import strip_control
-from morning_brew.triage.suspicious import INVISIBLE_CHARS, UNTRUSTED_CAP
+from morning_brew.triage.suspicious import UNTRUSTED_CAP, strip_invisible
 
 SYSTEM_PROMPT = (
     "You review Homebrew caveat text before an unattended formula upgrade.\n"
@@ -59,10 +59,15 @@ def _strip_delimiter(text: str) -> str:
 def _untrusted(text: str | None) -> str:
     if not text:
         return ""
-    # Strip before redacting: a secret split by control or invisible
-    # characters must be whole when redact sees it.
-    visible = INVISIBLE_CHARS.sub("", strip_control(text))
-    return _strip_delimiter(redact(visible))[:UNTRUSTED_CAP]
+    # Strip control and invisible characters, then the delimiter, before
+    # redacting: a secret split by any of them must be whole when redact
+    # sees it. Repeat to a fixed point so no removal can re-form either.
+    out = strip_invisible(strip_control(text))
+    while True:
+        nxt = _strip_delimiter(redact(_strip_delimiter(out)))
+        if nxt == out:
+            return out[:UNTRUSTED_CAP]
+        out = nxt
 
 
 def _fact(value: str | None) -> str:

@@ -17,7 +17,7 @@ import unicodedata
 
 from morning_brew.textsafe import strip_control
 from morning_brew.triage.schemas import RiskAssessment
-from morning_brew.triage.suspicious import INVISIBLE_CHARS
+from morning_brew.triage.suspicious import is_invisible, strip_invisible
 
 _FLAGS = re.IGNORECASE
 
@@ -35,20 +35,32 @@ _CUES = (
     (RESTART_CUES, "mentions_restart"),
     (MANUAL_STEP_CUES, "mentions_manual_step"),
 )
-# Punctuation splicing a word ("mi-grate", "re.start") is closed up.
-_SPLICE = re.compile(r"(?<=[A-Za-z])[-_.*`'\u00b7](?=[A-Za-z])")
+# Any run of punctuation or symbols splicing two letters ("mi-grate",
+# "re/start", "mi**grate") is closed up. Whitespace is not.
+_SPLICE = re.compile(r"(?<=[A-Za-z])[^\sA-Za-z0-9]+(?=[A-Za-z])")
 _RISK_FIELDS = tuple(field for _, field in _CUES)
 
 
 def _views(caveat: str) -> tuple[str, ...]:
     """The raw text plus the forms a model may read it as.
 
-    Cues hidden by control or invisible characters, full-width look-alikes,
-    or punctuation splicing a word still count.
+    Cues hidden by control or invisible characters, combining marks,
+    full-width look-alikes, or punctuation splicing a word still count.
     """
-    visible = INVISIBLE_CHARS.sub("", strip_control(caveat))
+    stripped = strip_control(caveat)
+    visible = strip_invisible(stripped)
     folded = unicodedata.normalize("NFKC", visible)
-    return (caveat, visible, folded, _SPLICE.sub("", folded))
+    bare = "".join(
+        ch for ch in unicodedata.normalize("NFKD", stripped) if not is_invisible(ch)
+    )
+    return (
+        caveat,
+        visible,
+        folded,
+        bare,
+        _SPLICE.sub("", folded),
+        _SPLICE.sub("", bare),
+    )
 
 
 def coverage_ok(caveat: str | None, a: RiskAssessment) -> bool:

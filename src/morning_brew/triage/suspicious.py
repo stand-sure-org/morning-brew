@@ -5,16 +5,38 @@ flagged caveat is held; no model ever reads it.
 """
 
 import re
+import unicodedata
 
 UNTRUSTED_CAP = 2000
 
 # ESC, C0 (except tab and newline), DEL, C1 (incl. 8-bit CSI), bare CR.
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)")
-# Invisible and direction-changing code points: zero-width, bidi embeddings
-# and isolates, BOM, word joiner, and Unicode tag characters (ASCII smuggling).
-INVISIBLE_CHARS = re.compile(
-    "[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\U000e0000-\U000e007f]"
+# Invisible code points, by Unicode category rather than a hand list: every
+# format char (Cf: zero-width, bidi, BOM, tag chars, interlinear annotation),
+# every non-spacing or enclosing mark (Mn/Me: variation selectors, CGJ,
+# Mongolian FVS, Khmer inherent vowels, combining marks), plus the line and
+# paragraph separators and the Hangul fillers, which render as nothing.
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Mn", "Me"})
+_INVISIBLE_EXTRA = frozenset(
+    [0x2028, 0x2029, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x180E, 0x034F]
+    + list(range(0xFE00, 0xFE10))
+    + list(range(0xE0100, 0xE01F0))
+    + list(range(0x180B, 0x1810))
+    + [0x17B4, 0x17B5, 0xFFF9, 0xFFFA, 0xFFFB]
+    + list(range(0xE0000, 0xE0080))
 )
+
+
+def is_invisible(ch: str) -> bool:
+    return (
+        ord(ch) in _INVISIBLE_EXTRA or unicodedata.category(ch) in _INVISIBLE_CATEGORIES
+    )
+
+
+def strip_invisible(text: str) -> str:
+    return "".join(ch for ch in text if not is_invisible(ch))
+
+
 # Homoglyph smuggling: full-width forms anywhere, or a word mixing ASCII
 # letters with Greek/Cyrillic letters ("Syst\u0435m", "\u043cigrate").
 _HOMOGLYPH = re.compile(
@@ -25,7 +47,7 @@ _HOMOGLYPH = re.compile(
 _PATTERNS = re.compile(
     r"</?\s*untrusted\b|untrusted-"  # the prompt's delimiter shape
     r"|\b(?:system|assistant|developer)\s*:"  # role-play prefixes
-    r"|#{2,}\s*instruction"
+    r"|##\s*instruction"
     r"|\bignor\w*\s+(?:\w+\s+){0,3}?(?:instruc|anweisung|consign)"  # en/fr/de
     r"|\bdisregard\s+(?:\w+\s+){0,3}?(?:instruc|above|previous|prior)"
     r"|\bverdict\b"
@@ -44,7 +66,7 @@ def suspicious_text(text: str | None) -> bool:
         return False
     if len(text) > UNTRUSTED_CAP:
         return True
-    if _CONTROL.search(text) or INVISIBLE_CHARS.search(text):
+    if _CONTROL.search(text) or any(is_invisible(ch) for ch in text):
         return True
     if _HOMOGLYPH.search(text):
         return True
