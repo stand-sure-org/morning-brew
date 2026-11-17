@@ -100,7 +100,7 @@ class OllamaClient:
     ):
         self._base = _validate_base_url(base_url)
         self._model = model
-        self._expected = _norm_digest(expected_digest) if expected_digest else None
+        self._expected = _norm_digest(expected_digest) or None
         self._opener = opener if opener is not None else _default_opener()
         self._runner = runner
         self._digest_result: bool | None = None
@@ -161,9 +161,7 @@ class OllamaClient:
                 if isinstance(entry, dict) and entry.get("name") == self._model:
                     found = _norm_digest(entry.get("digest"))
                     break
-        ok = (
-            self._expected is not None and found is not None and found == self._expected
-        )
+        ok = bool(found) and found == self._expected
         if self._expected is not None and not ok:
             log.warning("ollama digest pin mismatch or model missing (%s)", self._model)
         self._digest_result = ok

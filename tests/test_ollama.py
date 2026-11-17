@@ -279,9 +279,34 @@ def test_deeply_nested_json_is_invalid_output():
 
 
 def test_oversized_body_is_invalid_output():
-    opener = FakeOpener([b" " * (1_048_576 + 1)] * 2)
-    with pytest.raises(ModelInvalidOutput):
+    body = chat_body(json.dumps(GOOD))
+    body["pad"] = "x" * (1_048_576 + 1)
+    opener = FakeOpener([body] * 2)
+    with pytest.raises(ModelInvalidOutput, match="too large"):
         client(opener).assess(PROMPT)
+
+
+@pytest.mark.parametrize("pin", ["", "  ", "sha256:", " sha256: "])
+def test_empty_pin_fails_closed(pin: str):
+    opener = FakeOpener(
+        [chat_body(json.dumps(GOOD))], tags={"models": [{"name": "qwen3:4b"}]}
+    )
+    c = client(opener, digest=pin)
+    assert c.check_available().digest_ok is False
+    with pytest.raises(ModelUnavailable):
+        c.assess(PROMPT)
+    assert opener.chat_calls == 0
+
+
+def test_tags_entry_without_digest_never_matches():
+    opener = FakeOpener(
+        [chat_body(json.dumps(GOOD))], tags={"models": [{"name": "qwen3:4b"}]}
+    )
+    c = client(opener)
+    assert c.check_available().digest_ok is False
+    with pytest.raises(ModelUnavailable, match="digest mismatch"):
+        c.assess(PROMPT)
+    assert opener.chat_calls == 0
 
 
 def test_redirect_is_not_followed(monkeypatch: pytest.MonkeyPatch):
