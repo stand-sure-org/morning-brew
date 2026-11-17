@@ -155,3 +155,14 @@ def test_file_mode_0600(tmp_path):
     JsonlAudit(path).record(ev("p"))
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_partial_last_line_does_not_swallow_next_event(tmp_path, caplog):
+    path = tmp_path / "audit.jsonl"
+    path.write_text('{"run_id": "r1", "ts": "2026-11-17T07:0')
+    a = JsonlAudit(path)
+    a.record(ev("b"))
+    with caplog.at_level(logging.WARNING):
+        got = a.events_for("b")
+    assert [e.package for e in got] == ["b"]
+    assert "corrupt" in caplog.text

@@ -86,11 +86,24 @@ class JsonlAudit:
         line = json.dumps(_to_dict(safe), sort_keys=False, ensure_ascii=False) + "\n"
         self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         created = not self._path.exists()
+        if not created and not self._ends_with_newline():
+            line = "\n" + line  # isolate a partial line left by an interrupted append
         with open(self._path, "a", encoding="utf-8") as fh:
             if created:
                 os.fchmod(fh.fileno(), 0o600)
             fh.write(line)
             fh.flush()
+
+    def _ends_with_newline(self) -> bool:
+        try:
+            with open(self._path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                if fh.tell() == 0:
+                    return True
+                fh.seek(-1, os.SEEK_END)
+                return fh.read(1) == b"\n"
+        except FileNotFoundError:
+            return True
 
     def events_for(self, package: str) -> list[AuditEvent]:
         """Return events for ``package`` in append (file) order."""
