@@ -240,6 +240,10 @@ class UnlabeledCases(Exception):
     """The golden corpus has cases the owner has not labelled yet."""
 
 
+class InstallError(Exception):
+    """The LaunchAgent cannot be installed (venv missing or launchctl failed)."""
+
+
 class ConfigError(Exception):
     """The config file is invalid."""
 
