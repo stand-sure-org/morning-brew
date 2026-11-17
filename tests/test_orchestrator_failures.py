@@ -276,3 +276,10 @@ def test_triage_reasoning_is_stored_on_hold(ports_with, calls) -> None:
     run_once(ports, Config())
     hold = ports.holds.get("g")
     assert hold is not None and hold.model_reasoning == "because"
+
+
+def test_notifier_failure_and_unwritable_state(ports_with, calls) -> None:
+    assert run_once(ports_with(notifier=RaisingNotifier()), Config()).exit_code == 0
+    calls.clear()
+    assert run_once(ports_with(holds=UnwritableHolds()), Config()).exit_code == 1
+    assert "brew.update" not in calls
