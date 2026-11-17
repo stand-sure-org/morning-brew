@@ -57,7 +57,9 @@ class SeenStorePort(Protocol):
 
 class AuditPort(Protocol):
     def record(self, event: AuditEvent) -> None: ...
-    def events_for(self, package: str) -> list[AuditEvent]: ...
+    def events_for(self, package: str) -> list[AuditEvent]:
+        """Return events for ``package`` in append order."""
+        ...
 
 
 class NotifierPort(Protocol):
