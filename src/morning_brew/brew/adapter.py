@@ -97,7 +97,7 @@ class BrewCli:
             raise InvalidPackageName("refusing an upgrade with no package names")
         require_valid(names)
         result = self._call(["upgrade", "--", *names], UPGRADE_TIMEOUT)
-        if _BUSY in result.stderr:
+        if result.returncode != 0 and _BUSY in result.stderr:
             raise BrewBusyError(tail_redacted(result.stderr, 500))
         ok = result.returncode == 0 and _PINNED_REFUSAL not in result.stderr
         if not ok:

@@ -16,6 +16,9 @@ class SubprocessRunner:
     """A ``CommandRunner`` that runs argv with an allowlisted environment."""
 
     def __init__(self, env: Mapping[str, str]) -> None:
+        # [R37] Enforced here, not by wiring: brew must never auto-update.
+        if env.get("HOMEBREW_NO_AUTO_UPDATE") != "1":
+            raise ValueError("child env must set HOMEBREW_NO_AUTO_UPDATE=1")
         self._env = dict(env)
 
     def __call__(self, argv: Sequence[str], timeout: float) -> CommandResult:
@@ -27,7 +30,8 @@ class SubprocessRunner:
                 timeout=timeout,
                 shell=False,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=dict(self._env),
             )
         except subprocess.TimeoutExpired:

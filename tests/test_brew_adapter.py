@@ -320,9 +320,15 @@ def test_never_pin_or_greedy_or_bare_upgrade():
 
 # --- real subprocess runner -------------------------------------------------
 
+SAFE_ENV = child_env({"PATH": "/usr/bin:/bin"})
+
 
 def test_subprocess_runner_contract(tmp_path):
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "HOMEBREW_NO_AUTO_UPDATE": "1",
+    }
     run = SubprocessRunner(env)
     # LC_CTYPE is set by CPython itself (PEP 538 locale coercion) and
     # __CF_USER_TEXT_ENCODING by macOS; neither comes from the runner.
@@ -341,7 +347,7 @@ def test_subprocess_runner_contract(tmp_path):
 
 
 def test_subprocess_runner_timeout():
-    result = SubprocessRunner({})(
+    result = SubprocessRunner(SAFE_ENV)(
         [sys.executable, "-c", "import time; time.sleep(5)"], 0.2
     )
     assert result.returncode == 124
@@ -350,7 +356,7 @@ def test_subprocess_runner_timeout():
 
 
 def test_subprocess_runner_missing_binary(tmp_path):
-    result = SubprocessRunner({})([str(tmp_path / "nope")], 5)
+    result = SubprocessRunner(SAFE_ENV)([str(tmp_path / "nope")], 5)
     assert result.returncode == 127
 
 
@@ -367,3 +373,36 @@ def test_subprocess_runner_with_child_env_has_no_secrets():
         10,
     )
     assert result.stdout.strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [{}, {"HOMEBREW_NO_AUTO_UPDATE": "0"}, {"PATH": "/usr/bin"}],
+)
+def test_subprocess_runner_refuses_env_without_no_auto_update(env):  # R37
+    with pytest.raises(ValueError):
+        SubprocessRunner(env)
+
+
+def test_subprocess_runner_accepts_child_env():  # R37
+    SubprocessRunner(child_env({}))  # does not raise
+
+
+def test_subprocess_runner_survives_non_utf8_output():
+    script = (
+        "import sys; sys.stdout.buffer.write(bytes([255, 32]) + b'out'); "
+        "sys.stderr.buffer.write(bytes([255, 32]) + b'err')"
+    )
+    result = SubprocessRunner(SAFE_ENV)([sys.executable, "-c", script], 10)
+    assert result.returncode == 0
+    assert result.stderr.endswith(" err")
+    assert "\ufffd" in result.stderr
+    assert result.stdout.endswith(" out")
+
+
+def test_already_running_on_success_is_not_busy():
+    runner = RecordingRunner(
+        next=CommandResult(0, "", "Warning: another process is already running.")
+    )
+    result = make_cli(runner).upgrade(["a"])
+    assert result.ok is True
