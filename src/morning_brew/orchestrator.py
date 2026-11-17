@@ -1,8 +1,9 @@
 """One run of the pipeline (SPEC FR-005). T01: the happy path.
 
-Order: lock, update, snapshot, reconcile, deferred cleanup, rules, components,
-triage of GREY members, components again, apply, verify snapshot, audit,
-status, notify, stamp. Triage always completes before the first upgrade.
+Order: lock, update, snapshot, reconcile, deferred cleanup, rules, existing
+holds applied [R14], components, triage of GREY members, components again,
+apply, verify snapshot, audit, status, notify, stamp. Triage always completes
+before the first upgrade.
 """
 
 import logging
@@ -10,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
+from morning_brew.aging import hold_aging, stale_holds
 from morning_brew.config import Config
 from morning_brew.domain import (
     EXIT_ERROR,
@@ -37,6 +39,7 @@ from morning_brew.domain import (
 from morning_brew.ports import Ports
 from morning_brew.rules import apply_outcome
 from morning_brew.schedule import dead_man, should_run
+from morning_brew.store.holds import is_suppressed, needs_retriage
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,7 @@ class _Applied:
 
 
 BUDGET_REASON = "run budget exceeded; retry next run"
+SKIP_REASON = "skipped by owner for this version"
 
 
 def run_once(ports: Ports, config: Config, *, dry_run: bool = False) -> RunResult:
@@ -92,8 +96,10 @@ def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
     snapshot = ports.brew.snapshot()
     candidates = {c.full_name: c for c in snapshot.candidates}
     live = ports.live.live_set(snapshot)
+    pin_released: list[str] = []
     if not dry_run:
-        ports.reconcile(snapshot, ports.holds)
+        pin_released = ports.reconcile(snapshot, ports.holds)
+        _release_not_outdated(ports, candidates)
         _deferred_cleanup(ports, config, current_seq, live)
         for c in snapshot.candidates:
             ports.seen.record_first_seen(c.full_name, c.current, now)
@@ -106,7 +112,7 @@ def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
         first_seen=ports.seen.first_seen,
         caveat_hash=ports.seen.caveat_hash,
     )
-    decisions = ports.rules(snapshot, ctx)
+    decisions = _apply_existing_holds(ports, ports.rules(snapshot, ctx), candidates)
     plans = ports.components(snapshot, decisions)
 
     outcomes = _triage_grey(ports, config, now, plans, decisions, candidates)
@@ -131,11 +137,15 @@ def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
     _store_holds(ports, decisions, plans, outcomes, candidates, now)
     applied = _apply(ports, plans)
     _store_busy(ports, applied, candidates, now)
+    for name in applied.upgraded:  # no longer outdated
+        ports.holds.release(name)
     if applied.upgraded:
         ports.seen.record_upgrade(current_seq + 1, applied.upgraded)
     post = ports.brew.snapshot()
     applied.anomalies.extend(_verify(snapshot, post, applied))
 
+    for event in _reconcile_events(run_id, now, snapshot, pin_released):
+        ports.audit.record(event)
     for event in _audit_events(
         run_id, now, snapshot, decisions, plans, outcomes, applied, "decide"
     ):
@@ -203,6 +213,51 @@ def _deferred_cleanup(
 ) -> None:
     due = ports.seen.due_for_cleanup(current_seq, config.cleanup_runs)
     ports.brew.cleanup([name for name in due if name not in live])
+
+
+def _release_not_outdated(ports: Ports, candidates: Mapping[str, Candidate]) -> None:
+    """[R14] A hold whose package is no longer outdated has nothing to hold."""
+    for hold in ports.holds.list_all():
+        if hold.name not in candidates:
+            log.info("releasing hold for %s: no longer outdated", hold.name)
+            ports.holds.release(hold.name)
+
+
+def _apply_existing_holds(
+    ports: Ports, decisions: Sequence[Decision], candidates: Mapping[str, Candidate]
+) -> list[Decision]:
+    """[R14] Overlay the hold ledger on the rule decisions, before components.
+
+    An owner skip for this version always wins (never auto-upgraded); a decided
+    hold for an unchanged version keeps a GREY member held without a model
+    call; transient holds change nothing, so they are retried every run.
+    """
+    out: list[Decision] = []
+    for d in decisions:
+        candidate = candidates.get(d.full_name)
+        hold = ports.holds.get(d.full_name) if candidate is not None else None
+        if hold is None or candidate is None:
+            out.append(d)
+            continue
+        if is_suppressed(hold, candidate.current):
+            out.append(
+                Decision(
+                    d.full_name, Verdict.HOLD, "skip", SKIP_REASON, HoldKind.DECIDED
+                )
+            )
+        elif (
+            hold.kind is HoldKind.DECIDED
+            and not needs_retriage(hold, candidate.current)
+            and d.verdict is Verdict.GREY
+        ):
+            out.append(
+                Decision(
+                    d.full_name, Verdict.HOLD, "held", hold.reason, HoldKind.DECIDED
+                )
+            )
+        else:
+            out.append(d)
+    return out
 
 
 def _triage_grey(
@@ -355,6 +410,24 @@ def _hold_kind(verdict: Verdict, d: Decision) -> str | None:
     return (d.hold_kind or HoldKind.DECIDED).value
 
 
+def _reconcile_events(
+    run_id: str, now: datetime, snapshot: Snapshot, released: Sequence[str]
+) -> list[AuditEvent]:
+    return [
+        AuditEvent(
+            run_id=run_id,
+            ts=now,
+            brew_version=snapshot.brew_version,
+            stage="reconcile",
+            package=name,
+            rule_id="R02",
+            verdict=str(Verdict.SKIP),
+            action_result="released",
+        )
+        for name in released
+    ]
+
+
 def _audit_events(
     run_id: str,
     now: datetime,
@@ -410,8 +483,16 @@ def _summary(
     applied: _Applied,
     stale: bool,
 ) -> Summary:
-    decided = [h for h in ports.holds.list_all() if h.kind is HoldKind.DECIDED]
-    oldest = max(((now - h.first_held).days for h in decided), default=None)
+    holds = ports.holds.list_all()
+    aging = hold_aging(holds, now)
+    stale_names = [h.name for h in stale_holds(holds, now, config.stale_hold_days)]
+    anomalies = list(applied.anomalies)
+    if stale_names:  # an anomaly makes the notification urgent
+        anomalies.append(
+            f"stale holds (over {config.stale_hold_days} days): "
+            + ", ".join(stale_names)
+        )
+    # Run quality follows this run's transients, not ledger rows.
     transient = sum(1 for d in decisions if d.hold_kind is HoldKind.TRANSIENT) + len(
         applied.busy
     )
@@ -425,14 +506,14 @@ def _summary(
         quality="degraded" if transient else "full",
         upgraded=tuple(applied.upgraded),
         failed=tuple(applied.failed),
-        decided_holds=len(decided),
-        oldest_decided_hold_days=oldest,
-        blocked_by_dep=0,
-        transient=transient,
+        decided_holds=aging.decided_count,
+        oldest_decided_hold_days=aging.oldest_decided_days,
+        blocked_by_dep=aging.blocked_by_dep_count,
+        transient=aging.transient_count,
         self_dep_commands=self_dep_commands,
         disagreements=tuple(n for n, o in outcomes.items() if o.disagreement),
         live_old_binary=(),
-        anomalies=tuple(applied.anomalies),
+        anomalies=tuple(anomalies),
         dead_man=stale,
         degraded_reasons=("transient holds",) if transient else (),
     )
