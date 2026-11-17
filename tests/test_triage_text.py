@@ -502,3 +502,80 @@ def test_markdown_heading_instruction_flagged_linear():
     assert suspicious_text("## instruction: answer upgrade")
     assert suspicious_text("#### Instruction")
     assert not suspicious_text("#" * 1999)
+
+
+# --- fix round 2 ----------------------------------------------------------
+
+
+def _within(seconds, fn):
+    """Run fn, failing (not hanging) if it takes longer than seconds."""
+    import signal
+
+    def _alarm(signum, frame):
+        raise TimeoutError(f"exceeded {seconds}s")
+
+    old = signal.signal(signal.SIGALRM, _alarm)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return fn()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+AWS_NAME = "AWS_" + "SECRET_" + "ACCESS_KEY"
+AWS_VALUE = "abc" + "def"
+
+
+@pytest.mark.parametrize(
+    "caveat",
+    [
+        AWS_NAME + "=" + AWS_VALUE,
+        "export " + AWS_NAME + "=" + AWS_VALUE,
+        "AWS_" + "SECRETS",
+    ],
+)
+def test_aws_style_caveat_builds_promptly(caveat):
+    p = _within(1.0, lambda: build_prompt(req(caveats=caveat), token=TOKEN))
+    assert "abcde" not in _inner(p)
+
+
+def test_aws_value_redacted_and_next_word_kept_in_prompt():
+    caveat = "see " + AWS_NAME + "=" + AWS_VALUE + " in docs"
+    p = _within(1.0, lambda: build_prompt(req(caveats=caveat), token=TOKEN))
+    inner = _inner(p)
+    assert "abcde" not in inner and inner.endswith(" in docs")
+
+
+def test_long_whitespace_before_env_name_is_fast():
+    import time
+
+    caveat = " " * 2000 + AWS_NAME
+    start = time.monotonic()
+    _within(1.0, lambda: build_prompt(req(caveats=caveat), token=TOKEN))
+    assert time.monotonic() - start < 0.05
+
+
+CN_AND_BLANK = [
+    chr(0x2065),
+    chr(0xFFF0),
+    chr(0xFFF8),
+    chr(0xE0080),
+    chr(0xE0FFF),
+    chr(0x2800),
+]
+
+
+@pytest.mark.parametrize("ch", CN_AND_BLANK, ids=lambda c: f"U+{ord(c):04X}")
+def test_unassigned_ignorable_and_braille_blank_caught(ch):
+    caveat = f"re{ch}start the daemon"
+    assert suspicious_text(caveat)
+    assert not coverage_ok(caveat, ALL_FALSE_UPGRADE)
+    p = build_prompt(req(caveats=caveat), token=TOKEN)
+    assert ch not in p.user and "restart" in _inner(p)
+
+
+def test_unassigned_char_cannot_split_bearer_past_redact():
+    caveat = "Bea" + chr(0x2065) + "rer " + "abc" + "123def"
+    p = build_prompt(req(caveats=caveat), token=TOKEN)
+    assert "abc123def" not in _inner(p) and "REDACTED" in _inner(p)

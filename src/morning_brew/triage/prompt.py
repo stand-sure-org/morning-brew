@@ -38,6 +38,7 @@ _TOKEN = re.compile(r"[0-9a-f]{16,64}", re.ASCII)
 _DELIM = re.compile(r"untrusted-", re.IGNORECASE)
 _FACT_UNSAFE = re.compile(r"[^A-Za-z0-9@._+/,:~-]", re.ASCII)
 _FACT_CAP = 128
+_MAX_STRIP_ROUNDS = 8
 
 
 @dataclass(frozen=True)
@@ -59,15 +60,17 @@ def _strip_delimiter(text: str) -> str:
 def _untrusted(text: str | None) -> str:
     if not text:
         return ""
-    # Strip control and invisible characters, then the delimiter, before
-    # redacting: a secret split by any of them must be whole when redact
-    # sees it. Repeat to a fixed point so no removal can re-form either.
-    out = strip_invisible(strip_control(text))
-    while True:
-        nxt = _strip_delimiter(redact(_strip_delimiter(out)))
+    # Strip control and invisible characters and the delimiter until stable
+    # (each removal can splice a new one), so a secret split by any of them is
+    # whole when redact sees it. Redact exactly once; its marker holds no
+    # delimiter, so the final strip is a guard only. Then truncate.
+    out = text
+    for _ in range(_MAX_STRIP_ROUNDS):
+        nxt = _strip_delimiter(strip_invisible(strip_control(out)))
         if nxt == out:
-            return out[:UNTRUSTED_CAP]
+            break
         out = nxt
+    return _strip_delimiter(redact(out))[:UNTRUSTED_CAP]
 
 
 def _fact(value: str | None) -> str:

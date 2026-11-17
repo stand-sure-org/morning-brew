@@ -15,9 +15,19 @@ _SENSITIVE_PATTERNS = [
         r"([\"']?(?:password|secret|token|api[_\s-]?key)[\"']?\s*[:=]\s*[\"']?)([^\s\"',]+)",
         re.IGNORECASE,
     ),
-    re.compile(r"(AWS_SECRET\S*\s*=?\s*)(\S+)", re.IGNORECASE),
-    re.compile(r"(AWS_SESSION_TOKEN\s*=?\s*)(\S+)", re.IGNORECASE),
-    re.compile(r"(ANTHROPIC_API_KEY\s*=?\s*)(\S+)", re.IGNORECASE),
+    # env-var secrets: name chars only, REQUIRED [:=] separator, horizontal
+    # whitespace only. Linear, and idempotent (the marker re-redacts to itself).
+    re.compile(
+        r"(AWS_SECRET[A-Z0-9_]*[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)", re.IGNORECASE
+    ),
+    re.compile(
+        r"(AWS_SESSION_TOKEN[A-Z0-9_]*[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(ANTHROPIC_API_KEY[A-Z0-9_]*[ \t]*[:=][ \t]*[\"']?)([^\s\"',]+)",
+        re.IGNORECASE,
+    ),
     re.compile(r"(Bearer\s+)(\S+)", re.IGNORECASE),
     re.compile(r"(sk-ant-\S{4})\S+", re.IGNORECASE),
     re.compile(r"(xoxb-\S{4})\S+", re.IGNORECASE),
@@ -29,7 +39,10 @@ _SENSITIVE_PATTERNS = [
 
 
 def redact(text: str) -> str:
-    """Mask secret-shaped substrings with ``***REDACTED***``."""
+    """Mask secret-shaped substrings with ``***REDACTED***``.
+
+    Idempotent: ``redact(redact(x)) == redact(x)``.
+    """
     out = text
     for pattern in _SENSITIVE_PATTERNS:
         out = pattern.sub(lambda m: m.group(1) + REDACTED, out)

@@ -15,10 +15,12 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)")
 # format char (Cf: zero-width, bidi, BOM, tag chars, interlinear annotation),
 # every non-spacing or enclosing mark (Mn/Me: variation selectors, CGJ,
 # Mongolian FVS, Khmer inherent vowels, combining marks), plus the line and
-# paragraph separators and the Hangul fillers, which render as nothing.
-_INVISIBLE_CATEGORIES = frozenset({"Cf", "Mn", "Me"})
+# paragraph separators, the braille blank and the Hangul fillers, which
+# render as nothing. Unassigned code points (Cn) count too: several ranges
+# are reserved as default-ignorable and render as nothing when assigned.
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Cn"})
 _INVISIBLE_EXTRA = frozenset(
-    [0x2028, 0x2029, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x180E, 0x034F]
+    [0x2028, 0x2029, 0x2800, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x180E, 0x034F]
     + list(range(0xFE00, 0xFE10))
     + list(range(0xE0100, 0xE01F0))
     + list(range(0x180B, 0x1810))

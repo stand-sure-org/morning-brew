@@ -227,3 +227,70 @@ def test_new_file_never_looser_than_0600(tmp_path):
     finally:
         os.umask(old)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+AWS_NAME = "AWS_" + "SECRET_" + "ACCESS_KEY"
+AWS_VALUE = "abc" + "def"
+IDEMPOTENCE_PROBES = [
+    *(
+        p + TAIL
+        for p in ["Bearer ", "sk-" + "ant-api03-", "gh" + "p_", "token=", "password="]
+    ),
+    "https://user:" + TAIL + "@host/x",
+    "github" + "_pat_" + TAIL,
+    "API_KEY=" + TAIL,
+    "password: " + TAIL,
+    "token: " + TAIL,
+    '{"password": "' + TAIL + '"}',
+    '{"token":"' + TAIL + '"}',
+    "API_KEY: " + TAIL,
+    "api key: " + TAIL,
+    "secret: " + TAIL,
+    "api_key=" + TAIL,
+    "the API key rotation is due",
+    "invalid token in cache",
+    AWS_NAME + "=" + AWS_VALUE,
+    "export " + AWS_NAME + "=" + AWS_VALUE,
+    "AWS_" + "SECRETS",
+    "see " + AWS_NAME + "=" + AWS_VALUE + " in docs",
+    "AWS_" + "SESSION_TOKEN=" + AWS_VALUE,
+    "ANTHROPIC_" + "API_KEY: '" + AWS_VALUE + "'",
+    "xox" + "b-" + TAIL,
+]
+
+
+@pytest.mark.parametrize("text", IDEMPOTENCE_PROBES)
+def test_redact_is_idempotent(text):
+    once = redact(text)
+    assert redact(once) == once
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        AWS_NAME + "=" + AWS_VALUE,
+        "export " + AWS_NAME + "=" + AWS_VALUE,
+        "see " + AWS_NAME + "=" + AWS_VALUE + " in docs",
+        AWS_NAME + ' = "' + AWS_VALUE + '"',
+        "AWS_" + "SESSION_TOKEN=" + AWS_VALUE,
+        "ANTHROPIC_" + "API_KEY=" + AWS_VALUE,
+    ],
+)
+def test_env_var_secret_fully_redacted(text):
+    out = redact(text)
+    assert "abcde" not in out and "***REDACTED***" in out
+    if text.endswith(" in docs"):
+        assert out.endswith(" in docs")
+
+
+def test_bare_env_var_name_untouched():
+    assert redact("AWS_" + "SECRETS") == "AWS_" + "SECRETS"
+
+
+def test_env_var_pattern_is_linear():
+    import time
+
+    text = " " * 2000 + AWS_NAME
+    start = time.monotonic()
+    redact(text)
+    assert time.monotonic() - start < 0.05
