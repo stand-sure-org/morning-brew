@@ -49,3 +49,25 @@ def test_newest_installed_numeric_not_lexicographic():
 
 def test_newest_installed_falls_back_to_last_when_unparseable():
     assert newest_installed(["latest", "HEAD-abc"]) == "HEAD-abc"
+
+
+def test_huge_digit_string_is_unparseable():
+    huge = "1" * 5000
+    assert classify_bump(huge, "1.0") is Bump.UNPARSEABLE
+    assert newest_installed([huge]) == huge
+
+
+def test_unicode_digits_unparseable():
+    assert classify_bump("١.٠", "1.0") is Bump.UNPARSEABLE
+
+
+def test_trailing_newline_unparseable():
+    assert classify_bump("1.0\n", "1.0") is Bump.UNPARSEABLE
+
+
+def test_padded_equal_numbers_is_revision():
+    assert classify_bump("1.0", "1.0.0") is Bump.REVISION
+
+
+def test_newest_installed_orders_by_suffix():
+    assert newest_installed(["1.0_1", "1.0_2"]) == "1.0_2"

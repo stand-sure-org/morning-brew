@@ -5,11 +5,15 @@ from collections.abc import Sequence
 
 from morning_brew.domain import Bump
 
-_VERSION = re.compile(r"^(\d+(?:\.\d+)*)(?:[_-](\d+))?$")
+_VERSION = re.compile(r"(\d+(?:\.\d+)*)(?:[_-](\d+))?", re.ASCII)
+_MAX_LEN = 64
 
 
 def _parse(version: str) -> tuple[tuple[int, ...], int | None] | None:
-    match = _VERSION.match(version.split(",", 1)[0])
+    base = version.split(",", 1)[0]
+    if len(base) > _MAX_LEN:
+        return None
+    match = _VERSION.fullmatch(base)
     if match is None:
         return None
     numbers = tuple(int(part) for part in match.group(1).split("."))
