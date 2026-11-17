@@ -59,8 +59,10 @@ def _strip_delimiter(text: str) -> str:
 def _untrusted(text: str | None) -> str:
     if not text:
         return ""
-    clean = INVISIBLE_CHARS.sub("", strip_control(redact(text)))
-    return _strip_delimiter(clean)[:UNTRUSTED_CAP]
+    # Strip before redacting: a secret split by control or invisible
+    # characters must be whole when redact sees it.
+    visible = INVISIBLE_CHARS.sub("", strip_control(text))
+    return _strip_delimiter(redact(visible))[:UNTRUSTED_CAP]
 
 
 def _fact(value: str | None) -> str:
