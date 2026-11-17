@@ -728,7 +728,7 @@ def tail_redacted(text: str, limit: int = 2000) -> str
 class JsonlAudit(AuditPort): __init__(self, path: Path); record(event); events_for(package) -> list[AuditEvent]
 ```
 
-Header comment credits `/Volumes/Repos/phlegyas/phlegyas/sanitize.py` as the origin (vendored, not imported). JSON keys exactly: `run_id, ts, brew_version, stage, package, rule_id, verdict, action_result, models, booleans, reasoning, component` [ruling R3].
+Header comment credits `/Volumes/Repos/phlegyas/phlegyas/sanitize.py` as the origin (vendored, not imported). JSON keys exactly: `run_id, ts, brew_version, stage, package, rule_id, verdict, action_result, models, booleans, reasoning, component, hold_kind` [rulings R3, R20].
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -1009,7 +1009,7 @@ Plus `@pytest.mark.integration` test hitting the real local Ollama (skipped by d
 - Produces:
 
 ```python
-def fnox_get(name: str, runner: CommandRunner) -> str            # argv ["fnox","get",name], timeout 10; rc!=0 or empty -> SecretUnavailable
+def fnox_get(name: str, runner: CommandRunner, config_path: Path) -> str   # argv ["fnox","get","--config",str(config_path),name], timeout 10; rc!=0 or empty -> SecretUnavailable [ruling R19 / S4: fnox resolves config from cwd, launchd has none]
 class ClaudeClient(ModelClient):
     def __init__(self, model: str, effort: str, key_provider: Callable[[], str],
                  client_factory: Callable[[str], Any] | None = None)   # client_factory(key) -> anthropic.Anthropic
@@ -1022,7 +1022,7 @@ Behavior: the key is obtained on the first `assess` only; the request contains `
 
 ```python
 def test_fnox_get_contract():
-    assert fnox_get("ANTHROPIC_API_KEY", runner_ok("sk-test\n")) == "sk-test" and runner.calls == [(["fnox","get","ANTHROPIC_API_KEY"], 10)]
+    assert fnox_get("ANTHROPIC_API_KEY", runner_ok("sk-test\n"), Path("/p/fnox.toml")) == "sk-test" and runner.calls == [(["fnox","get","--config","/p/fnox.toml","ANTHROPIC_API_KEY"], 10)]
 def test_fnox_failure_is_secret_unavailable(): ...
 def test_key_is_lazy_and_never_in_environ(caplog):
     c = ClaudeClient("claude-sonnet-5-5","low", provider, factory); assert provider.calls == 0
@@ -1037,7 +1037,7 @@ def test_secret_unavailable_is_transient(): ...
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/test_claude.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** using the exact call found in S6.
+- [ ] **Step 3: Implement** using the exact call recorded in DESIGN §7 "S6 outcome" (`client.beta.messages.parse(..., output_format=RiskAssessment, betas=["server-side-fallback-2026-07-01"], fallbacks="default")`, `.parsed_output`, refusal/auth/exception mapping as listed there). Add `test_auth_error_is_transient_and_flags_anomaly` and `test_request_uses_server_side_fallbacks_default`.
 - [ ] **Step 4: Run** the same command. Expected: PASS (error-class cases skipped only when the extra is not installed).
 - [ ] **Step 5: Commit** `git commit --no-gpg-sign -m "feat(triage): Claude client with lazy fnox key and transient mapping"`.
 
@@ -1067,6 +1067,7 @@ def test_plist_contents():
     p = plistlib.loads(render_plist(Path("/p/.venv/bin/morning-brew"), Path("/Users/me")))
     assert p["StartInterval"] == 3600 and "RunAtLoad" not in p and p["ProgramArguments"] == ["/p/.venv/bin/morning-brew","run"]
     assert "fnox" not in " ".join(p["ProgramArguments"]) and p["EnvironmentVariables"]["PATH"].startswith("/opt/homebrew/bin")
+    assert "WorkingDirectory" not in p                                  # [S4] background jobs cannot getcwd under /Volumes
     assert p["StandardOutPath"].endswith("Library/Logs/morning-brew/stdout.log") and p["ProcessType"] == "Background"
 def test_install_and_uninstall_argv(): assert runner.calls[0][0][:3] == ["launchctl","bootstrap","gui/501"] and runner_u.calls[0][0][:3] == ["launchctl","bootout","gui/501"]
 def test_install_requires_built_venv(tmp_path): with pytest.raises(InstallError): install(runner, tmp_path/"missing", tmp_path, 501)
