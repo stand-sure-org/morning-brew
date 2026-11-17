@@ -28,7 +28,7 @@ Observed workload (2026-11-17, Homebrew 7.0.14): 21-22 formulae and 1 cask outda
 | # | Decision | By | Status after Delphi |
 |---|----------|----|---------------------|
 | D1 | Autonomy "option 2": upgrade clearly safe, hold the rest, report. | USER | CHANGED by owner O1: HOLD = exclude from the explicit upgrade list and record in the ledger; the tool creates no pins. Existing user pins (redis, deliberate) are SKIP and never touched. [DESIGNER-READING of "we don't generally pin anything"] |
-| D2 | Advisor escalation: small local model first, frontier Claude when judgment is needed; Claude path configurable; key via fnox | USER | REFINED by O2/O3: one local model (qwen3:4b) classifies caveats only and may add risk, never remove it; Claude (L3) is in v1, runs even when Ollama is down, and is the only stage that can approve a GREY case. glm-4.7-flash dropped |
+| D2 | Advisor escalation: small local model first, frontier Claude when judgment is needed; Claude path configurable; key via fnox | USER | REFINED by O2/O3: one local model (qwen3:4b) classifies caveats as a recorded second opinion only (post-approval: its flags route to Claude, never hold); Claude (L3) is in v1, runs even when Ollama is down, and is the only stage that can approve a GREY case. glm-4.7-flash dropped |
 | D3 | Python + uv + launchd | DESIGNER (accepted) | Stands. Plist runs the venv binary directly, `StartInterval` 3600, no `RunAtLoad` [PANEL] |
 | D4 | Borrow phlegyas ideas | USER | Stands |
 | D5 | Rules first and always win | DESIGNER | Hardened [PANEL]: models may only add risk, except L3 narrowly approving GREY |

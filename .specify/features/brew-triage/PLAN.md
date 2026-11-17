@@ -55,7 +55,7 @@ Points are Fibonacci complexity points; no time estimates; no task at 21 or more
 |----|------|-----|---------|
 | T16 | Golden set (~25-30 real, dangerous and injection cases) plus `morning-brew eval` runner reusing the audit JSONL; ship-gate check and refusal of `chain.mode=live` without a recorded pass (FR-057) | 5 | T10, T13 |
 | T17 | Prompt builder (random delimiters, caps, redaction), `suspicious_text` flag, boolean-first schemas (pydantic), coverage check (FR-051, 052, 056) | 5 | T16 |
-| T18 | Chain logic with scripted fakes: suspicious flag, local add-risk-only, Claude blind, shadow vs live, Ollama-down still reaches Claude, unsure paths -> transient (FR-050..053) | 5 | T17 |
+| T18 | Chain logic with scripted fakes: suspicious flag, local second-opinion (never decides; disagreement surfaced), Claude blind, shadow vs live, Ollama-down still reaches Claude, unsure paths -> transient (FR-050..053) | 5 | T17 |
 | T19 | Ollama adapter: stdlib urllib, `format` schema, `think:false`, `num_predict`, digest pin, loopback-only and off-loopback warning (FR-055) | 3 | T18 |
 | T20 | Claude adapter + lazy `fnox get` (10 s, stdin devnull, key never in env), refusal and typed-error mapping to transient (FR-054) | 5 | T18, S4, S6 |
 

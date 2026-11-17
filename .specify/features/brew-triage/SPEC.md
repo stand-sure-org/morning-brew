@@ -26,7 +26,7 @@ Vocabulary: **Candidate** (outdated formula or cask); **Verdict**: UPGRADE-ELIGI
 - AC: orchestrator test with fakes asserts call ordering and that no `upgrade` call precedes the last triage call.
 
 **FR-006 [PANEL]** Self-dependencies (fnox, the tool's venv python, brew) are REPORTED, not upgraded in-run; their component is DEFER.
-- AC: component containing the venv python is not upgraded and appears in status as "upgrade manually".
+- AC: component containing the venv python is not upgraded and appears in status as "upgrade manually" with the exact copy-pasteable `brew upgrade -- <component members>` command [USER, post-v1.1 approval: no self-upgrade step].
 
 ## B. Snapshot and facts
 
@@ -79,10 +79,10 @@ Vocabulary: **Candidate** (outdated formula or cask); **Verdict**: UPGRADE-ELIGI
 ## F. Triage chain
 
 **FR-050 [USER via O3, PANEL]** Only GREY members are triaged. Fixed-outcome categories (FR-030 rule 9, rule 8) make zero model calls. Chain: deterministic `suspicious_text` flag (flag -> decided HOLD, no model call), then optional local classifier (qwen3:4b), then Claude.
-- AC: scripted fakes cover: flag set; local risk true; local down; local invalid output; Claude hold; Claude upgrade.
+- AC: scripted fakes cover: flag set; local risk true (still reaches Claude); local down; local invalid output; Claude hold; Claude upgrade.
 
-**FR-051 [PANEL]** The local classifier returns required booleans `mentions_migration`, `mentions_data_format`, `mentions_restart`, `mentions_manual_step`, `boilerplate_only`, emitted before `verdict`. It may only add risk: any risk boolean true is a decided HOLD. No local output can cause an upgrade. `think:false`, `num_predict` about 400; truncated or invalid JSON after one retry is "unsure" (skip the local stage, do not hold).
-- AC: local output `upgrade`/all-false never changes a GREY member to ELIGIBLE by itself; truncated JSON handled.
+**FR-051 [PANEL]** The local classifier returns required booleans `mentions_migration`, `mentions_data_format`, `mentions_restart`, `mentions_manual_step`, `boilerplate_only`, emitted before `verdict`. **[USER, post-v1.1 approval]** Local output never changes a member's outcome: it can neither cause an upgrade nor a hold. Every GREY member that passes the `suspicious_text` flag reaches Claude regardless of local output. Local risk flags are audited and, when Claude clears a member the local stage flagged, surfaced in the summary and `status` as a disagreement. `think:false`, `num_predict` about 400; truncated or invalid JSON after one retry is "unsure" (skip the local stage, do not hold).
+- AC: local output `upgrade`/all-false never changes a GREY member to ELIGIBLE by itself; local risk-true still reaches Claude and is not held by the local stage; local-flagged + Claude-cleared appears as a disagreement in the summary; truncated JSON handled.
 
 **FR-052 [USER via O2, PANEL]** Claude (L3) is in v1, judges blind (facts plus sanitized caveat, never local reasoning), and runs even when Ollama is down. It uses the same boolean schema plus `verdict upgrade|hold` and a deterministic coverage check (every risk cue found in the caveat text must be reflected by the matching boolean). UPGRADE only if booleans are all false (or `boilerplate_only`), verdict is `upgrade` and coverage passes. No confidence field, no caps or thresholds.
 - AC: caveat containing "migrate" with all-false booleans fails coverage -> HOLD; Ollama down still reaches Claude.
