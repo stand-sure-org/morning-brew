@@ -76,7 +76,7 @@ check_invariants() {   # PLAN Global Constraints, enforced statically on src/
   ! grep -rn 'HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK' $s && pass "dependents check never disabled" || fail "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK in src"
   ! grep -rnE 'os\.environ\[[^]]*\]\s*=|os\.environ\.(update|setdefault)|putenv' $s && pass "never writes os.environ" || fail "src writes os.environ (key could leak to children)"
   ! grep -rnE '^\s*print\(' $s --include='*.py' | grep -v '/cli.py:' && pass "print only in cli.py" || fail "print() outside cli.py"
-  ! grep -rnE '\b(httpx|requests|ollama|click|typer|tomli_w|tomlkit)\b' $s --include='*.py' | grep -E 'import' && pass "no banned deps imported" || fail "banned dependency imported"
+  ! grep -rnE '^\s*(import|from)\s+(httpx|requests|ollama|click|typer|tomli_w|tomlkit)(\s|\.|$)' $s --include='*.py' && pass "no banned deps imported" || fail "banned dependency imported"
   # every subprocess call site must pass timeout= and stdin=
   local bad; bad="$(grep -rnE 'subprocess\.(run|Popen|check_output|call)\(' $s | while IFS=: read -r f l _; do
       ctx="$(sed -n "${l},$((l+8))p" "$f")"
