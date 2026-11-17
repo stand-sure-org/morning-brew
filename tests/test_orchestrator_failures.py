@@ -26,6 +26,7 @@ from morning_brew.domain import (
     Decision,
     Hold,
     HoldKind,
+    Stamp,
     StateUnwritable,
     Summary,
     TriageOutcome,
@@ -116,11 +117,15 @@ def ports_with(calls: list[str]):  # noqa: ANN201
 
 def test_update_failure_aborts_before_mutation(ports_with, calls) -> None:
     brew = FakeBrew(calls, [make_snapshot()], raise_on_update=BrewUpdateError("net"))
-    r = run_once(ports_with(brew=brew), Config())
+    prior = Stamp(NOW - timedelta(days=1), NOW - timedelta(days=1), "full", 4)
+    ports = ports_with(brew=brew, stamp=FakeStamp(calls, stamp=prior))
+    r = run_once(ports, Config())
     assert r.exit_code == 75 and r.summary is None
-    assert not any(
-        c.startswith(("brew.upgrade", "brew.cleanup", "stamp.write")) for c in calls
-    )
+    # a stamp write is bookkeeping, not a brew mutation [R17]
+    assert not any(c.startswith(("brew.upgrade", "brew.cleanup")) for c in calls)
+    written = ports.stamp.written[-1]
+    assert written.quality == "degraded"
+    assert written.last_full_success == prior.last_full_success
 
 
 def test_nothing_outdated_is_a_clean_noop(ports_with, calls) -> None:  # Review Focus 1

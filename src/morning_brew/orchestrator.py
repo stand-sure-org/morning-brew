@@ -87,6 +87,7 @@ def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
             ports.brew.update()
         except BrewUpdateError:
             log.exception("brew update failed; aborting before any mutation")
+            _record_failed_attempt(ports, run_id, now, prev_stamp, config)
             return RunResult(exit_code=EXIT_TEMPFAIL, summary=None)
     snapshot = ports.brew.snapshot()
     candidates = {c.full_name: c for c in snapshot.candidates}
@@ -147,6 +148,26 @@ def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
     _notify(ports, summary)
     ports.stamp.write(_next_stamp(prev_stamp, summary, now))
     return RunResult(exit_code=EXIT_OK, summary=summary)
+
+
+def _record_failed_attempt(
+    ports: Ports, run_id: str, now: datetime, prev: Stamp | None, config: Config
+) -> None:
+    """[R17] A failed update is an attempt: stamp it so the dead-man can trip."""
+    stamp = Stamp(
+        last_full_success=prev.last_full_success if prev else None,
+        last_attempt=now,
+        quality="degraded",
+        full_runs=prev.full_runs if prev else 0,
+        first_attempt=(prev.first_attempt if prev else None) or now,
+    )
+    try:
+        ports.stamp.write(stamp)
+    except OSError:
+        log.exception("could not record the failed attempt")
+        return
+    if dead_man(now, stamp, config.dead_man_hours):
+        _notify(ports, _gated_summary(run_id, True))
 
 
 def _gated_summary(run_id: str, stale: bool) -> Summary:

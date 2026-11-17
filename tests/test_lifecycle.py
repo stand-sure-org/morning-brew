@@ -24,7 +24,7 @@ from fakes import (
     recording_rules,
 )
 from morning_brew.config import Config
-from morning_brew.domain import Decision, LockHeld, Stamp, Verdict
+from morning_brew.domain import BrewUpdateError, Decision, LockHeld, Stamp, Verdict
 from morning_brew.orchestrator import run_once
 from morning_brew.ports import Ports
 from morning_brew.schedule import dead_man, should_run
@@ -264,3 +264,36 @@ def test_stamp_write_keeps_first_attempt_once(ports_with, calls) -> None:
     fresh = ports_with()
     run_once(fresh, Config())
     assert fresh.stamp.written[-1].first_attempt == NOW
+
+
+def test_update_failure_records_attempt_and_trips_dead_man(ports_with, calls) -> None:
+    prior_success = at("2026-11-15 07:00")  # 49 h before NOW
+    prior = Stamp(prior_success, prior_success, "full", 4, first_attempt=prior_success)
+    brew = FakeBrew(calls, [make_snapshot()], raise_on_update=BrewUpdateError("net"))
+    ports = ports_with(brew=brew, stamp=FakeStamp(calls, stamp=prior))
+    r = run_once(ports, Config())
+    assert r.exit_code == 75
+    written = ports.stamp.written[-1]
+    assert written.quality == "degraded"
+    assert written.last_full_success == prior_success
+    assert written.last_attempt == NOW and written.full_runs == 4
+    assert written.first_attempt == prior_success
+    assert len(ports.notifier.sent) == 1
+    summary, urgent = ports.notifier.sent[0]
+    assert urgent is True and summary.dead_man is True
+
+
+def test_update_failure_within_window_is_quiet(ports_with, calls) -> None:
+    prior = full(at("2026-11-16 07:00"))
+    brew = FakeBrew(calls, [make_snapshot()], raise_on_update=BrewUpdateError("net"))
+    ports = ports_with(brew=brew, stamp=FakeStamp(calls, stamp=prior))
+    run_once(ports, Config())
+    assert ports.stamp.written[-1].quality == "degraded"
+    assert ports.notifier.sent == []
+
+
+def test_lock_held_writes_no_stamp(ports_with, calls) -> None:
+    ports = ports_with(lock=LockedLock(calls))
+    run_once(ports, Config())
+    assert ports.stamp.written == []
+    assert ports.notifier.sent == []
