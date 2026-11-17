@@ -12,6 +12,7 @@ from datetime import datetime
 
 from morning_brew.domain import (
     AuditEvent,
+    BrewBusyError,
     ComponentPlan,
     Decision,
     Hold,
@@ -33,9 +34,15 @@ class FakeBrew:
     snapshots: list[Snapshot]
     upgrades: list[tuple[str, ...]] = field(default_factory=list)
     cleaned: list[tuple[str, ...]] = field(default_factory=list)
+    raise_on_update: Exception | None = None
+    closure: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    upgrade_results: Mapping[str, UpgradeResult] = field(default_factory=dict)
+    busy_on: frozenset[str] = frozenset()
 
     def update(self) -> None:
         self.calls.append("brew.update")
+        if self.raise_on_update is not None:
+            raise self.raise_on_update
 
     def snapshot(self) -> Snapshot:
         self.calls.append("brew.snapshot")
@@ -46,9 +53,17 @@ class FakeBrew:
     def upgrade(self, members: Sequence[str]) -> UpgradeResult:
         self.calls.append("brew.upgrade:" + ",".join(members))
         self.upgrades.append(tuple(members))
+        if self.busy_on.intersection(members):
+            raise BrewBusyError("another brew process is running")
+        for m in members:
+            if m in self.upgrade_results:
+                return self.upgrade_results[m]
         return UpgradeResult(ok=True, stderr_tail="")
 
     def dry_run_closure(self, members: Sequence[str]) -> frozenset[str]:
+        for m in members:
+            if m in self.closure:
+                return self.closure[m]
         return frozenset(members)
 
     def cleanup(self, packages: Sequence[str]) -> None:

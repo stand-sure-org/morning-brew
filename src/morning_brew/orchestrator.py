@@ -7,13 +7,17 @@ status, notify, stamp. Triage always completes before the first upgrade.
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 
 from morning_brew.config import Config
 from morning_brew.domain import (
+    EXIT_ERROR,
     EXIT_OK,
+    EXIT_TEMPFAIL,
     AuditEvent,
+    BrewBusyError,
+    BrewUpdateError,
     Candidate,
     ComponentPlan,
     Decision,
@@ -23,6 +27,7 @@ from morning_brew.domain import (
     RunResult,
     Snapshot,
     Stamp,
+    StateUnwritable,
     Summary,
     TriageOutcome,
     Verdict,
@@ -38,6 +43,12 @@ log = logging.getLogger(__name__)
 class _Applied:
     upgraded: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    busy: list[str] = field(default_factory=list)
+    excluded: list[str] = field(default_factory=list)
+    anomalies: list[str] = field(default_factory=list)
+
+
+BUDGET_REASON = "run budget exceeded; retry next run"
 
 
 def run_once(ports: Ports, config: Config, *, dry_run: bool = False) -> RunResult:
@@ -47,7 +58,16 @@ def run_once(ports: Ports, config: Config, *, dry_run: bool = False) -> RunResul
         prev_stamp = ports.stamp.read()
         current_seq = prev_stamp.full_runs if prev_stamp else 0
 
-        ports.brew.update()
+        try:
+            ports.holds.ensure_writable()
+        except StateUnwritable:
+            log.exception("state directory is not writable; aborting before update")
+            return RunResult(exit_code=EXIT_ERROR, summary=None)
+        try:
+            ports.brew.update()
+        except BrewUpdateError:
+            log.exception("brew update failed; aborting before any mutation")
+            return RunResult(exit_code=EXIT_TEMPFAIL, summary=None)
         snapshot = ports.brew.snapshot()
         candidates = {c.full_name: c for c in snapshot.candidates}
         live = ports.live.live_set(snapshot)
@@ -68,7 +88,7 @@ def run_once(ports: Ports, config: Config, *, dry_run: bool = False) -> RunResul
         decisions = ports.rules(snapshot, ctx)
         plans = ports.components(snapshot, decisions)
 
-        outcomes = _triage_grey(ports, plans, decisions, candidates)
+        outcomes = _triage_grey(ports, config, now, plans, decisions, candidates)
         if outcomes:
             decisions = [
                 apply_outcome(d, outcomes[d.full_name])
@@ -78,22 +98,35 @@ def run_once(ports: Ports, config: Config, *, dry_run: bool = False) -> RunResul
             ]
             plans = ports.components(snapshot, decisions)
 
-        _store_holds(ports, decisions, candidates, now)
+        _store_holds(ports, decisions, plans, outcomes, candidates, now)
         applied = _apply(ports, plans)
+        _store_busy(ports, applied, candidates, now)
         if applied.upgraded:
             ports.seen.record_upgrade(current_seq + 1, applied.upgraded)
-        ports.brew.snapshot()  # verify by re-snapshot (comparison lands in T02)
+        post = ports.brew.snapshot()
+        applied.anomalies.extend(_verify(snapshot, post, applied))
 
         for event in _audit_events(
             run_id, now, snapshot, decisions, plans, outcomes, applied
         ):
             ports.audit.record(event)
 
-        summary = _summary(run_id, now, config, ports, decisions, outcomes, applied)
+        summary = _summary(
+            run_id, now, config, ports, decisions, plans, outcomes, applied
+        )
         ports.status.write(summary)
-        ports.notifier.notify(summary, urgent=summary.dead_man)
+        _notify(ports, summary)
         ports.stamp.write(_next_stamp(prev_stamp, summary, now))
         return RunResult(exit_code=EXIT_OK, summary=summary)
+
+
+def _notify(ports: Ports, summary: Summary) -> None:
+    try:
+        ports.notifier.notify(
+            summary, urgent=summary.dead_man or bool(summary.anomalies)
+        )
+    except Exception:  # a broken notifier must never fail the run
+        log.exception("notifier failed; continuing")
 
 
 def _deferred_cleanup(
@@ -105,6 +138,8 @@ def _deferred_cleanup(
 
 def _triage_grey(
     ports: Ports,
+    config: Config,
+    started: datetime,
     plans: Sequence[ComponentPlan],
     decisions: Sequence[Decision],
     candidates: Mapping[str, Candidate],
@@ -121,6 +156,9 @@ def _triage_grey(
                 continue
             if decision.verdict is not Verdict.GREY:
                 continue
+            if ports.clock() - started > timedelta(minutes=config.run_budget_minutes):
+                outcomes[member] = TriageOutcome("transient", BUDGET_REASON, "budget")
+                continue
             outcomes[member] = ports.triage.triage(request_from(candidate))
     return outcomes
 
@@ -128,24 +166,71 @@ def _triage_grey(
 def _store_holds(
     ports: Ports,
     decisions: Sequence[Decision],
+    plans: Sequence[ComponentPlan],
+    outcomes: Mapping[str, TriageOutcome],
     candidates: Mapping[str, Candidate],
     now: datetime,
 ) -> None:
+    plan_of = {m: p for p in plans for m in p.members}
     for d in decisions:
         if d.verdict is not Verdict.HOLD:
             continue
         candidate = candidates.get(d.full_name)
         version = candidate.current if candidate else ""
+        kind = d.hold_kind or HoldKind.DECIDED
+        plan = plan_of.get(d.full_name)
+        blocked_by = plan.blocked_by if plan else None
+        outcome = outcomes.get(d.full_name)
         existing = ports.holds.get(d.full_name)
-        ports.holds.put(
-            Hold(
-                name=d.full_name,
-                kind=d.hold_kind or HoldKind.DECIDED,
+        if existing is not None:
+            hold = replace(
+                existing,
+                kind=kind,
                 held_at_version=version,
                 reason=d.reason,
-                first_held=existing.first_held if existing else now,
+                blocked_by=blocked_by,
             )
-        )
+            if outcome is not None:
+                hold = replace(hold, model_reasoning=outcome.reasoning)
+        else:
+            hold = Hold(
+                name=d.full_name,
+                kind=kind,
+                held_at_version=version,
+                reason=d.reason,
+                first_held=now,
+                blocked_by=blocked_by,
+                model_reasoning=outcome.reasoning if outcome else None,
+            )
+        ports.holds.put(hold)
+
+
+def _store_busy(
+    ports: Ports,
+    applied: _Applied,
+    candidates: Mapping[str, Candidate],
+    now: datetime,
+) -> None:
+    for name in applied.busy:
+        candidate = candidates.get(name)
+        version = candidate.current if candidate else ""
+        existing = ports.holds.get(name)
+        if existing is not None:
+            hold = replace(
+                existing,
+                kind=HoldKind.TRANSIENT,
+                held_at_version=version,
+                reason="brew busy; retry next run",
+            )
+        else:
+            hold = Hold(
+                name=name,
+                kind=HoldKind.TRANSIENT,
+                held_at_version=version,
+                reason="brew busy; retry next run",
+                first_held=now,
+            )
+        ports.holds.put(hold)
 
 
 def _apply(ports: Ports, plans: Sequence[ComponentPlan]) -> _Applied:
@@ -153,10 +238,40 @@ def _apply(ports: Ports, plans: Sequence[ComponentPlan]) -> _Applied:
     for plan in plans:
         if plan.status is not Verdict.ELIGIBLE:
             continue
-        result = ports.brew.upgrade(plan.members)
+        expected = frozenset(plan.members)
+        closure = ports.brew.dry_run_closure(plan.members)
+        if closure != expected:
+            extra = ",".join(sorted(closure - expected))
+            missing = ",".join(sorted(expected - closure))
+            applied.excluded.extend(plan.members)
+            applied.anomalies.append(
+                f"closure mismatch for {','.join(plan.members)}: "
+                f"extra [{extra}] missing [{missing}]"
+            )
+            continue
+        try:
+            result = ports.brew.upgrade(plan.members)
+        except BrewBusyError:
+            log.warning("brew busy; %s deferred to next run", plan.members)
+            applied.busy.extend(plan.members)
+            continue
         target = applied.upgraded if result.ok else applied.failed
         target.extend(plan.members)
     return applied
+
+
+def _verify(pre: Snapshot, post: Snapshot, applied: _Applied) -> list[str]:
+    """Anomaly: a package we did not touch changed installed version or vanished."""
+    touched = set(applied.upgraded) | set(applied.failed)
+    after = {c.full_name: c for c in post.candidates}
+    anomalies: list[str] = []
+    for c in pre.candidates:
+        if c.full_name in touched:
+            continue
+        now_c = after.get(c.full_name)
+        if now_c is None or now_c.installed != c.installed:
+            anomalies.append(f"{c.full_name} changed during run without being upgraded")
+    return anomalies
 
 
 def _component_id(plan: ComponentPlan | None) -> str | None:
@@ -185,6 +300,10 @@ def _audit_events(
             action = "upgraded"
         elif d.full_name in applied.failed:
             action = "failed"
+        elif d.full_name in applied.busy:
+            action = "transient"
+        elif d.full_name in applied.excluded:
+            action = "excluded"
         events.append(
             AuditEvent(
                 run_id=run_id,
@@ -209,12 +328,20 @@ def _summary(
     config: Config,
     ports: Ports,
     decisions: Sequence[Decision],
+    plans: Sequence[ComponentPlan],
     outcomes: Mapping[str, TriageOutcome],
     applied: _Applied,
 ) -> Summary:
     decided = [h for h in ports.holds.list_all() if h.kind is HoldKind.DECIDED]
     oldest = max(((now - h.first_held).days for h in decided), default=None)
-    transient = sum(1 for d in decisions if d.hold_kind is HoldKind.TRANSIENT)
+    transient = sum(1 for d in decisions if d.hold_kind is HoldKind.TRANSIENT) + len(
+        applied.busy
+    )
+    self_dep_commands = tuple(
+        "brew upgrade -- " + " ".join(sorted(p.members))
+        for p in plans
+        if p.status is Verdict.DEFER and ports.self_deps.intersection(p.members)
+    )
     return Summary(
         run_id=run_id,
         quality="degraded" if transient else "full",
@@ -224,12 +351,12 @@ def _summary(
         oldest_decided_hold_days=oldest,
         blocked_by_dep=0,
         transient=transient,
-        self_dep_commands=(),
+        self_dep_commands=self_dep_commands,
         disagreements=tuple(n for n, o in outcomes.items() if o.disagreement),
         live_old_binary=(),
-        anomalies=(),
+        anomalies=tuple(applied.anomalies),
         dead_man=False,
-        degraded_reasons=(),
+        degraded_reasons=("transient holds",) if transient else (),
     )
 
 
