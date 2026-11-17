@@ -243,20 +243,49 @@ def test_explain_json_uses_latest_run_dry_run_included(capsys):
     assert got["component"] == "a,redis"
 
 
-def test_explain_json_hold_kind_from_hold_store(capsys):
+def test_explain_json_hold_kind_from_event_with_empty_hold_store(capsys):
+    ev = event(stage="dry_run", verdict="hold", rule_id="R05", hold_kind="decided")
+    main(["explain", "redis", "--json"], deps_factory=with_audit(ev))
+    assert json.loads(capsys.readouterr().out)["hold_kind"] == "decided"
+
+
+def test_explain_json_hold_kind_ignores_live_hold_store(capsys):
     holds = FakeHolds()
     holds.put(
         Hold(
             name="redis",
-            kind=HoldKind.TRANSIENT,
+            kind=HoldKind.DECIDED,
             held_at_version="1",
             reason="x",
             first_held=NOW,
         )
     )
-    ev = event(verdict="hold", rule_id="chain")
+    ev = event(verdict="hold", rule_id="chain", hold_kind="transient")
     main(["explain", "redis", "--json"], deps_factory=with_audit(ev, holds=holds))
     assert json.loads(capsys.readouterr().out)["hold_kind"] == "transient"
+    ev2 = event(verdict="eligible", rule_id="R12")
+    main(["explain", "redis", "--json"], deps_factory=with_audit(ev2, holds=holds))
+    assert json.loads(capsys.readouterr().out)["hold_kind"] is None
+
+
+def test_explain_json_equal_ts_last_event_wins(capsys):
+    first = event(run_id="r1", verdict="grey", rule_id="R11")
+    final = event(run_id="r1", verdict="hold", rule_id="chain", hold_kind="decided")
+    main(["explain", "redis", "--json"], deps_factory=with_audit(first, final))
+    got = json.loads(capsys.readouterr().out)
+    assert (got["decision"], got["rule_id"], got["hold_kind"]) == (
+        "hold",
+        "chain",
+        "decided",
+    )
+
+
+def test_explain_json_equal_ts_across_runs_last_run_wins(capsys):
+    a = event(run_id="rA", verdict="skip", rule_id="R02")
+    b = event(run_id="rB", verdict="eligible", rule_id="R12")
+    main(["explain", "redis", "--json"], deps_factory=with_audit(a, b))
+    got = json.loads(capsys.readouterr().out)
+    assert (got["run_id"], got["decision"]) == ("rB", "eligible")
 
 
 def test_explain_json_unknown_package_exits_2(capsys):

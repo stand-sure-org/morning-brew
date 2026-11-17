@@ -76,13 +76,16 @@ def _cmd_status(deps: CliDeps) -> int:
 
 
 def _latest_run_events(events: Sequence[AuditEvent]) -> list[AuditEvent]:
+    """Decision events of the newest run; ties on ts go to the later-appended."""
     decided = [
-        e for e in events if e.stage in _DECISION_STAGES and e.verdict is not None
+        (e.ts, i, e)
+        for i, e in enumerate(events)
+        if e.stage in _DECISION_STAGES and e.verdict is not None
     ]
     if not decided:
         return []
-    latest = max(decided, key=lambda e: e.ts)
-    return [e for e in decided if e.run_id == latest.run_id]
+    latest = max(decided, key=lambda t: (t[0], t[1]))[2]
+    return [e for _, _, e in decided if e.run_id == latest.run_id]
 
 
 def _cmd_explain(deps: CliDeps, package: str, as_json: bool) -> int:
@@ -95,11 +98,7 @@ def _cmd_explain(deps: CliDeps, package: str, as_json: bool) -> int:
         _err(f"no record for {package}")
         return EXIT_USAGE
     if as_json:
-        final = max(latest, key=lambda e: e.ts)
-        hold_kind = None
-        if final.verdict == "hold":
-            hold = deps.ports.holds.get(package)
-            hold_kind = hold.kind.value if hold is not None else None
+        final = latest[-1]  # events_for is append-ordered; the last one is final
         _emit(
             json.dumps(
                 {
@@ -107,7 +106,7 @@ def _cmd_explain(deps: CliDeps, package: str, as_json: bool) -> int:
                     "decision": final.verdict,
                     "rule_id": final.rule_id,
                     "component": final.component,
-                    "hold_kind": hold_kind,
+                    "hold_kind": final.hold_kind,
                     "run_id": final.run_id,
                 }
             )

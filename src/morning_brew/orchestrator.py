@@ -349,6 +349,12 @@ def _component_id(plan: ComponentPlan | None) -> str | None:
     return ",".join(sorted(plan.members))
 
 
+def _hold_kind(verdict: Verdict, d: Decision) -> str | None:
+    if verdict is not Verdict.HOLD:
+        return None
+    return (d.hold_kind or HoldKind.DECIDED).value
+
+
 def _audit_events(
     run_id: str,
     now: datetime,
@@ -387,6 +393,7 @@ def _audit_events(
                 models=((outcome.stage, None),) if outcome else (),
                 reasoning=outcome.reasoning if outcome else None,
                 component=_component_id(plan),
+                hold_kind=_hold_kind(verdict, d),
             )
         )
     return events

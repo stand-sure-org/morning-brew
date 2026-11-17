@@ -159,6 +159,8 @@ class AuditEvent:
     # [R3/R4] ",".join(sorted(members)) for multi-member components;
     # None for singletons and casks.
     component: str | None = None
+    # [R20] HoldKind value of the recorded decision when the verdict is hold.
+    hold_kind: str | None = None
 
 
 @dataclass(frozen=True)

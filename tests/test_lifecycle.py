@@ -24,7 +24,14 @@ from fakes import (
     recording_rules,
 )
 from morning_brew.config import Config
-from morning_brew.domain import BrewUpdateError, Decision, LockHeld, Stamp, Verdict
+from morning_brew.domain import (
+    BrewUpdateError,
+    Decision,
+    HoldKind,
+    LockHeld,
+    Stamp,
+    Verdict,
+)
 from morning_brew.orchestrator import run_once
 from morning_brew.ports import Ports
 from morning_brew.schedule import dead_man, should_run
@@ -297,3 +304,23 @@ def test_lock_held_writes_no_stamp(ports_with, calls) -> None:
     run_once(ports, Config())
     assert ports.stamp.written == []
     assert ports.notifier.sent == []
+
+
+def test_audit_events_carry_hold_kind_in_dry_run_and_real_run(
+    ports_with, calls
+) -> None:
+    decisions = [
+        Decision("a", Verdict.HOLD, "R05", "x", hold_kind=HoldKind.DECIDED),
+        Decision("b", Verdict.HOLD, "R05", "y", hold_kind=HoldKind.TRANSIENT),
+    ]
+    for dry in (True, False):
+        ports = ports_with(rules=recording_rules(calls, decisions))
+        run_once(ports, Config(), dry_run=dry)
+        kinds = {e.package: e.hold_kind for e in ports.audit.events}
+        assert kinds == {"a": "decided", "b": "transient"}
+
+
+def test_audit_event_hold_kind_none_when_not_held(ports_with) -> None:
+    ports = ports_with()
+    run_once(ports, Config(), dry_run=True)
+    assert {e.hold_kind for e in ports.audit.events} == {None}
