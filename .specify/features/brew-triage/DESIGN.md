@@ -1,237 +1,219 @@
 # DESIGN: brew-triage
 
-**Version:** 1.0 (Pre-Delphi)
+**Version:** 1.1 (Post-Delphi)
 **Date:** 2026-11-17
-**Changes:** Initial design
+**Changes:** Folds in the 2-round, 5-panelist Delphi review (`reviews/delphi-2026-11-17.md`) and the four owner decisions. Removed: confidence/caps/threshold scheme, bounded drop-iteration with dry-run parsing as primary, glm advisor stage, OpenAI-compatible adapter, cask apply path, all pin creation/ownership/unpin machinery, `fnox exec` plist wrapper, two calendar slots plus RunAtLoad, `say`-by-default. Added: connected-component decision unit, live-process set, tap trust and soak, caveat diffing, boolean risk fields with coverage check, decided/transient holds, reconcile and dead-man alarm, hold aging, golden set and shadow mode, lazy `fnox get` with env allowlist.
 
-Authorship legend: [USER] decided by the user; [DESIGNER] open to Delphi challenge. Unless tagged [USER], everything below is a designer's call.
+Authorship legend: [USER] decided by the user; [PANEL] settled by the Delphi panel (unanimous or 4/5); [DESIGNER] designer's call, still open to challenge. Items marked **[DESIGNER-READING]** are the designer's interpretation of an owner statement and may be corrected by the owner.
 
-## 1. Evidence log (what was actually checked, 2026-11-17)
+## 0. Owner decisions (2026-11-17) [USER]
 
-| Check | Result |
-|---|---|
-| `brew --version` | Homebrew 7.0.14-44-g8655ee4 |
-| `brew outdated --json=v2` | 21 formulae + 1 cask. Plain mode excludes `auto_updates` casks |
-| `brew outdated --json=v2 --greedy` | 21 formulae + 8 casks (7 with `auto_updates: true`) |
-| `brew info --json=v2 --installed` | 533 formulae, 28 casks in info (cask count differs from the 30 in the brief; the join must tolerate mismatch) |
-| `brew leaves` | 273. 5 of 21 outdated formulae are non-leaf dependencies (aws-c-auth, aws-c-s3, numpy, pkgconf, usage) |
-| `brew services list --json` | entries with `name`, `status` ("none" or "started" ...), `user`, `file`, `exit_code` |
-| `brew pin --help` | "Usage: brew pin [--formula] [--cask] installed_formula\|installed_cask"; note: "Pinned casks with auto_updates true may update themselves outside Homebrew" |
-| `brew upgrade --help` | has `-n/--dry-run`, `--formula`, `--cask`, `--greedy-latest`, `--greedy-auto-updates`, `--greedy` |
-| `man launchd.plist` | "launchd will start the job the next time the computer wakes up. If multiple intervals transpire before the computer is woken, those events will be coalesced into one event upon wake from sleep." Nothing is promised for power-off |
-| Ollama | version 0.40.16 at :11434; native `/api/chat` with `format` JSON schema and `think:false` returned schema-valid JSON; cold model load 11.5 s (total 12.5 s, eval 0.9 s) |
-| Ollama OpenAI-compat | `/v1/chat/completions` with `response_format: json_schema` returned valid JSON for qwen3:4b, but with thinking on by default (a `reasoning` field was returned). Verified for Ollama only; omlx and LM Studio NOT verified |
-| Model quality probe | qwen3:4b given a nonexistent "leaf CLI" patch bump answered upgrade, confidence 0.95, with the false claim "leaf = no dependencies". Self-reported confidence is not a safe sole escalation signal |
-| uv | 0.12.6 |
-| PyPI | anthropic 2.9.0 (2026-11-16, requires `httpx2` not `httpx`, `pydantic>=1.10`); pydantic 2.14.3; httpx 0.28.1 (2024-12-06); ollama 0.6.3 |
-| Claude API reference (claude-api skill) | model ids `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` confirmed. On opus-5-5 / sonnet-5-5: forced `tool_choice` returns 400 (so use `output_config.format` structured output, not forced tool_use); thinking cannot be disabled on opus-5-5 (effort `low` is the lever; default effort is `medium`); non-default sampling params 400 on sonnet-5-5 (do not send temperature); `stop_reason == "refusal"` must be handled; server-side `fallbacks` is recommended for these models |
+| # | Decision | Effect |
+|---|----------|--------|
+| O1 | "We don't generally pin anything." [DESIGNER-READING of the owner's words] HOLD = excluded from the explicit upgrade list and recorded in the tool's ledger and status. The tool creates no pins, ever. Existing user pins (redis, deliberate: kept installed while valkey runs in its place) are SKIP and never touched | Replaces D1's "pin" wording. Removes pending_pin journal, pin ownership, unpin-on-release |
+| O2 | Claude (L3) is in v1, and runs even when Ollama is down. fnox fetch failure is a transient hold (retried), never a decided hold | L3 is the only stage that can approve a GREY case |
+| O3 | One local model (qwen3:4b), caveat classification only. glm-4.7-flash dropped. Claude is the advisor | Chain is local classifier then Claude |
+| O4 | Deferred cleanup after 2 full successful runs, never cleaning kegs in the live-process set | Rollback window is zero today anyway |
 
-Phlegyas ideas reused (read at /Volumes/Repos/phlegyas/phlegyas): tier1 post-hoc re-check of AI approvals; tier2 deterministic allow patterns; tier2.5 hash-based trust (not reused; see section 12); tier3 random-delimiter armoring, system/user separation, 4000-char input cap, confidence caps by category, structured output; `sanitize.py` regex redaction (adapted, vendored, not imported); `file_queue.py` atomic per-item JSON files; `notifiers.py` fire-and-forget notifier that never raises.
+Carried over: autonomy "option 2" (auto-upgrade clearly safe, hold the rest, report), Python/uv/launchd, borrow from phlegyas, Claude path configurable with the key in fnox.
 
-## 2. Architecture overview
+## 1. Evidence log
 
-```
-launchd --> morning-brew run
-              |
-              v
-  Orchestrator (run_once)  <-- defines ports it consumes (ISP, consumer-defined)
-     | BrewPort        update / snapshot / dry_run_closure / upgrade / pin / unpin / cleanup
-     | Triage          decide(candidate_facts) -> TriageOutcome   (chain behind it)
-     | HoldStore       get / put / list_tool_owned / mark
-     | AuditSink       append(record)
-     | Notifier[]      notify(summary)
-     | Clock, Lock, RunStamp
-```
+Own research (2026-11-17, read-only): Homebrew 7.0.14; `brew outdated --json=v2` (21 formulae, 1 cask; `--greedy` 8 casks); `brew info --json=v2 --installed` (533 formulae, 28 casks); `brew leaves` 273; `brew services list --json`; `brew pin --help` and `brew upgrade --help`; `man launchd.plist` (missed fire during sleep runs on wake and coalesces; nothing promised for power-off); Ollama 0.40.16 `/api/chat` with `format` + `think:false` valid, cold load 11.5 s; PyPI: anthropic 2.9.0 (2026-11-16, depends on `httpx2`), pydantic 2.14.3, httpx 0.28.1 (2024-12-06), ollama 0.6.3; uv 0.12.6; Claude API reference (model ids `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`; no forced tool_choice on opus-5-5/sonnet-5-5, use `output_config.format`; opus-5-5 cannot disable thinking; refusal stop_reason).
 
-Pipeline per run:
+Panel-verified evidence (Delphi, read-only, see `reviews/delphi-2026-11-17.md` section "Key evidence"; cited here by number E1..E10, raw files in `reviews/delphi-round1|2/`):
+- E1 Upgrade closure is bidirectional: `brew upgrade aws-c-auth --dry-run` also upgrades dependents aws-c-s3 and awscli; `brew upgrade awscli` pulls its deps (`upgrade.rb:300-307`). A pinned outdated dependency makes dependents uninstallable (`formula_installer.rb:488-512`); a pinned broken dependent is not repaired (`upgrade.rb:445-455`).
+- E2 `brew services` under-reports live services: vector and nats-server show `none` but run from user LaunchAgents (`com.logshipping.vector`, `anderson.nats-server`); vector runs from the versioned keg `Cellar/vector/0.61.0`; rabbitmq's beam.smp runs from `Cellar/erlang/29.1.2`; grafana shows `started` with exit_code 1. Started services: etcd, grafana, loki, prometheus, rabbitmq, valkey.
+- E3 Brew never restarts upgraded services; new code first starts at next login/reboot.
+- E4 Casks: plain `outdated` already includes stale auto_updates casks; `--greedy` entries are stale Caskroom metadata (ghostty bundle already 1.4.0); naming a cask bypasses auto_updates protection; brew quits running apps by default (`--no-quit` needed). Plain mode lists 1 outdated cask.
+- E5 Local model probe (directional, small n): qwen3:4b returned "upgrade ~0.95" for a synthetic data-loss caveat and confidence 1.0 for an injected instruction, hallucinated `leaf`/`service_defined` on most cases, risk flags on nearly all samples. glm-4.7-flash returned invalid JSON on dangerous/injected cases, ran >300 s uncapped, 6 of 10 truncated at num_predict 600. `think:true` + `format` on qwen never finished.
+- E6 Ollama listens on `*:11434`; model tags are mutable via `/api/create`.
+- E7 Taps: 51-55 installed, but only 3 of 22 outdated formulae come from them (oh-my-posh, smartthings, vector).
+- E8 Rollback window today is zero: no formula has more than one keg; casks keep one version; no `brew switch`.
+- E9 (Corrected by owner) the redis pin is deliberate and is NOT evidence of hold rot. Hold aging and the dead-man alarm stand on their own merits.
+- E10 The tool's own toolchain (fnox, python@3.13/3.14) is in the current upgrade set; Homebrew self-updated 7.0.14-44 to -67 during the review.
 
-1. Acquire lock (flock). Check stamp. Preflight (brew present).
-2. `brew update` (retry/backoff; failure aborts, FR-060).
-3. Snapshot and join (section 3). Build `Candidate` list with facts.
-4. Deferred cleanup of packages from older runs (FR-057).
-5. Rules layer (section 5) -> verdicts; GREY set.
-6. Triage chain over GREY (section 6), within time budget.
-7. Closure check (section 7) -> final verdicts.
-8. Apply: pin HOLDs (tool-owned, ledgered), unpin-and-upgrade previously held packages only if re-triaged to UPGRADE, upgrade UPGRADEs one at a time.
-9. Verify via re-snapshot. Anomalies flagged.
-10. Audit, summary, notify, write stamp, release lock.
+Phlegyas ideas reused: post-hoc re-check of AI approvals, deterministic patterns first, random-delimiter armoring, system/user separation, input caps, structured output, redaction regexes (adapted and vendored, not imported), atomic per-item JSON files, never-raising notifiers.
 
-## 3. Observed JSON shapes and the join
-
-`brew outdated --json=v2 --greedy` (observed keys):
-- `formulae[]`: `name`, `installed_versions[]`, `current_version`, `pinned`, `pinned_version`.
-- `casks[]`: same keys.
-- NOTE: for tap formulae `name` is the full name (`vectordotdev/brew/vector`, `jandedobbeleer/oh-my-posh/oh-my-posh`). Joining on short `name` loses tap and service data (this bug was made during the research probe: vector's service block was missed). **Join on `full_name`.**
-
-`brew info --json=v2 --installed`:
-- `formulae[]` (selected observed keys): `name`, `full_name`, `tap`, `desc`, `homepage`, `versions.stable`, `revision`, `service` (non-null object when the formula declares a service), `caveats`, `deprecated`, `disabled`, `deprecation_reason`, `pinned`, `outdated`, `keg_only`, `installed[]` with `version`, `runtime_dependencies`, `installed_on_request`, `time`; `dependencies`, `build_dependencies`.
-- `casks[]`: `token`, `full_token`, `tap`, `desc`, `homepage`, `version`, `installed`, `outdated`, `pinned`, `pinned_version`, `auto_updates`, `caveats`, `artifacts`, `depends_on`, `deprecated`, `disabled`.
-- Installed dependents are computed locally by inverting `installed[].runtime_dependencies` (no extra `brew uses` subprocess).
-
-`brew leaves`: newline-separated short names (leaf = not required by another installed formula).
-`brew services list --json`: `[{name, status, user, file, exit_code}]`. Presence of a `service` block in info means the formula can run as a service; `status != "none"` means it is registered/started. Both are consulted (FR-030 rule 6 vs 11). Observed: caddy/cockroach/dnsmasq status "none"; etcd "started"; 30 formulae have a `service` block.
-
-Join key summary: formula = `full_name`; cask = `token` (outdated cask `name` equals token). A candidate that cannot be joined becomes HOLD "unjoinable", never dropped.
-
-Artifacts shape for casks (pkg vs app, process name for running-app check) was NOT inspected in the research pass; Plan task S2 is a read-only spike to confirm before FR-030 rule 4 and FR-056 are implemented.
-
-## 4. Domain model
+## 2. Architecture
 
 ```
-Candidate(kind: formula|cask, full_name, installed: str, current: str,
-          bump: Bump, is_leaf, dependents: int, service_defined, service_status,
-          caveats: str|None, deprecated, disabled, tap, pin: PinState(pinned, owner),
-          auto_updates, artifact_kinds, version_is_latest)
-Verdict = UPGRADE | HOLD | SKIP | DEFER | REPORT | GREY
-Decision(candidate, verdict, rule_id, stage, reasons[], confidence_raw, confidence_clamped, models[])
-HoldRecord(full_name, kind, held_at_version, reason, owner="tool", pinned_by_tool: bool,
-           advisor_reasoning, state: held|skipped_for_version|released, created, updated)
+launchd (StartInterval 3600) --> .venv/bin/morning-brew run
+   Orchestrator.run_once  (defines the ports it consumes; ISP)
+     BrewPort        update / snapshot / upgrade(components) / cleanup(pkgs) / dry_run(cross-check)
+     LiveProcessPort live-process set (services, LaunchAgents, running exes)
+     Triage          classify(caveat facts) -> outcome   (local classifier + Claude behind it)
+     HoldStore       decided/transient holds, first-seen, caveat hashes
+     AuditSink  Notifier[]  StatusFile  Clock  Lock  RunStamp
 ```
 
-Bump classifier (`versions.py`): normalize `1.5.9,4515810895593472` by taking the part before the comma; strip a trailing `_N` (brew revision) and `-N` (build) into `revision`; split dotted numerics; if any non-numeric segment remains (for example `stable_02`) return `unparseable`. Same numeric tuple with different revision -> `revision`. Differing last component -> `patch`; second -> `minor`; first -> `major`. If major == 0 and minor differs -> `zero_major_minor`. Calver strings that happen to be dotted numerics (ballerina `2201.14.1`) classify like semver; this is a known imprecision, the safe direction is preserved because the first component rarely changes. Fixture table in SPEC FR-020.
+Run pipeline (SPEC FR-005; "triage completes before apply" is a tested invariant):
 
-## 5. Rules layer
+1. Lock, then schedule gate: not before `earliest_hour`, and no second full run in the same calendar day (stamp). Dead-man check and reconcile (section 9).
+2. `brew update` (bounded retry). Failure: abort before any mutation, exit 75 (a log marker only; the next hourly fire is the retry).
+3. Snapshot and join (section 3); build facts; update first-seen ledger.
+4. Deferred cleanup of kegs from runs at least 2 full successful runs old, excluding the live-process set.
+5. Rules (section 5) per package, then connected components (section 6).
+6. Triage of GREY components' members (section 7), within the run budget.
+7. Apply: for each ELIGIBLE component, one `brew upgrade -- a b c`; verify by re-snapshot.
+8. Audit, status file, summary, notifications, stamp (`quality: full|degraded`).
 
-Rule table (ordered) lives in `rules.py` as data: `Rule(id, predicate, verdict, cap)`. See SPEC FR-030/031 for the order. Rationales:
+## 3. Snapshot, shapes, join
 
-- User pin first: respects the user's explicit hold (redis is user-pinned in observed data).
-- Major bump HOLD: breaking changes and licence/data-format risk (redis 7.2.7 -> 8.10.3 is exactly this).
-- Service rule: hold when `service_status != none`. A formula that declares a service but is not registered (caddy: none) is only GREY, because upgrading it cannot restart or reformat a live data store. Delphi question 7.
-- Caveats GREY: caveats are the maintainers' own "read this" signal (observed on awscli, imagemagick, numpy, rabbitmq, antigravity-cli, miniforge).
-- 0.x minor GREY: semver says anything may change at 0.y; this keeps noise low versus HOLD (grype, vector).
-- Deprecated GREY, disabled HOLD (cannot be upgraded meaningfully; report).
+- Formulae/casks outdated: `brew outdated --json=v2` (plain, NOT `--greedy`; E4: greedy entries are stale metadata). Observed keys: `name`, `installed_versions[]`, `current_version`, `pinned`, `pinned_version`. Tap formulae appear by full name (`vectordotdev/brew/vector`).
+- `brew info --json=v2 --installed`: formula keys include `name`, `full_name`, `tap`, `desc`, `homepage`, `versions.stable`, `bottle` (`{}` for source-built, e.g. abctl), `service`, `caveats`, `deprecated`, `disabled`, `pinned`, `installed[].runtime_dependencies`, `installed_on_request`. Cask keys include `token`, `auto_updates`, `artifacts`, `caveats`.
+- `brew leaves`; `brew services list --json` (`name`, `status`, `user`, `file`, `exit_code`).
+- Join on `full_name` (formulae) / `token` (casks). The info cask list had 28 entries versus 30 casks in the owner's count, so the join tolerates mismatches: an unjoinable candidate is a transient hold "unjoinable", never dropped.
+- Dependents are computed by inverting `runtime_dependencies` locally.
+- brew stderr (for example the ngrok `postflight` warning) is logged at debug and never affects parsing. `brew --version` is recorded in every audit record. `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is never set.
 
-Hand-run on the 21 observed formulae (illustrative): UPGRADE 13 (aws-c-auth, aws-c-s3, ballerina, calm-cli, docker, fnox, pkgconf, skopeo, specify, summarize, syft, usage, werf), GREY 4 (awscli, grype, imagemagick, numpy), HOLD 3 (oh-my-posh major; rabbitmq and vector service, assuming started), SKIP 1 (redis user-pinned). Casks: 7 auto-updating REPORT; antigravity-cli GREY (caveats).
+## 4. Version classifier
 
-## 6. Triage chain
+Unchanged from v1.0: strip the part after a comma; trailing `_N` and `-N` are `revision`; dotted numerics compare to patch/minor/major; any non-numeric segment (`stable_02`) or `latest` is `unparseable`; 0.x with differing minor is `zero_major_minor`. Fixture table in SPEC FR-020.
 
-Port (defined by the orchestrator, ISP):
+## 5. Rules layer (first match wins; table is data)
 
-```python
-class Triage(Protocol):
-    def decide(self, request: TriageRequest) -> TriageOutcome: ...
-```
+Verdict set: UPGRADE-ELIGIBLE, HOLD, SKIP, DEFER, REPORT, GREY. A package-level HOLD or SKIP propagates to its whole component (section 6).
 
-`TriageOutcome(verdict: upgrade|hold, confidence, risk_flags, facts_used, rationale, stage, model_id, unsure: bool)`. The chain (L1 -> L2 -> L3) is an internal implementation of `Triage`, composed from `ModelClient` ports each defined by the chain: `ModelClient.ask(system, user, schema) -> dict`.
+1. Name fails validation (leading `-`, `..`, outside `^[A-Za-z0-9@._+/\-]+$` after the first char) -> HOLD (transient, reason "invalid name").
+2. User-pinned (`pinned: true` on outdated/info) -> SKIP. Never touched, never unpinned. (A pinned member makes its component SKIP, since a pinned outdated dependency makes dependents uninstallable, E1.)
+3. Casks -> REPORT (all casks, v1). Includes stale auto_updates casks listed by plain `outdated`.
+4. `disabled` -> HOLD.
+5. Self-dependency of the tool (fnox, python of the tool's venv, brew itself) -> REPORT "upgrade manually"; its component is DEFER (the tool never upgrades what it runs on in-run).
+6. Non-core tap and not in `trusted_taps` -> HOLD. `trusted_taps` is seeded once at `install`/setup by the owner.
+7. No arm64 bottle (empty or missing `bottle`) -> HOLD.
+8. In the live-process set (section 8), or in the runtime-dependency closure of a live-process member -> HOLD.
+9. Major bump -> HOLD. `unparseable`, `deprecated`, high-dependent dependency (10 or more installed dependents) -> HOLD (fixed outcomes need no model).
+10. Soak: current version first seen less than `min_age_days` (default 3) ago -> DEFER. Applies to all packages.
+11. `zero_major_minor` or changed caveats (hash differs from the hash recorded at last upgrade; section 7) -> GREY.
+12. Otherwise (revision/patch/minor, no flags, unchanged-or-absent caveats) -> UPGRADE-ELIGIBLE.
 
-Stages [USER]: L1 small local (default `qwen3:4b`), L2 local advisor (default `glm-4.7-flash`, 19 GB, fits in 64 GB), L3 Claude (default `claude-sonnet-5-5`; `claude-opus-5-5` or `claude-haiku-5-5` selectable). Unsure -> next stage; terminal unsure -> HOLD.
+Caveat baseline [DESIGNER, unsettled]: at setup, the tool records the hash of every currently installed package's caveats as "already seen"; unchanged boilerplate is then not a signal (S10). Without seeding every caveat-bearing package would be GREY on the first run.
 
-Escalation signal [DESIGNER] (because self-reported confidence is poorly calibrated):
-1. confidence below 0.8 after cap clamp, or
-2. any `risk_flags` (closed enum: `breaking_change_possible`, `data_format_change`, `runtime_restart_needed`, `many_dependents`, `unclear`, `other`), or
-3. claim-check failure: `facts_used` is a closed enum (`leaf`, `no_dependents`, `patch_bump`, ...); each is verified against the real facts, mismatch -> unsure, or
-4. L1 and L2 verdicts disagree (L2 is shown L1's verdict and rationale as untrusted context; L3 sees both), or
-5. invalid schema after one retry, or timeout.
-Agreement of two independent stages with both above threshold is required to auto-approve a GREY candidate when L3 is not consulted: L1 `upgrade` alone is never enough in categories with cap < 1.0 (all GREY categories have caps, so a GREY upgrade always needs at least two stages agreeing, or L3 alone deciding). Delphi question 3.
+Hand-run (illustrative, not executed) on the 21 formulae observed in the research pass, in steady state after the soak window; edges beyond the aws trio were not inspected, so component membership elsewhere is unknown and numpy/imagemagick may or may not join a component with a deferred self-dependency (python).
 
-Prompt armoring (phlegyas tier3 pattern): system prompt contains rules and schema description; user message contains only a fixed-format facts block plus the untrusted fields wrapped in `<untrusted-{secrets.token_hex(8)}>` tags; any occurrence of the delimiter in input is stripped; each untrusted field is capped (2000 chars) and passed through the redactor first. The model is told the wrapped text is data. Output is schema-constrained, so there is no free-form parse path.
+| Package | Outcome | Rule |
+|---|---|---|
+| redis | SKIP | user pin (deliberate; valkey runs in its place) |
+| rabbitmq | HOLD | started in brew services (and its erlang dependency is live: beam.smp runs from `Cellar/erlang`) |
+| vector | HOLD | live-process set via user LaunchAgent `com.logshipping.vector` (brew services says `none`) and non-core tap unless trusted |
+| oh-my-posh | HOLD | non-core tap (and major bump 32 -> 33) |
+| fnox | REPORT | self-dependency |
+| aws-c-auth, aws-c-s3, awscli | one component, ELIGIBLE if caveats unchanged | component, E1 |
+| grype | GREY | zero_major_minor (0.121.3 -> 0.122.0) |
+| ballerina, calm-cli, docker, pkgconf, skopeo, specify, summarize, syft, usage, werf | ELIGIBLE | revision/patch/minor |
+| imagemagick, numpy | ELIGIBLE or GREY | depends on caveat hash and component membership |
 
-Ollama adapter (v1): POST `/api/chat`, `stream:false`, `think:false`, `format: <JSON schema from pydantic>`, `options:{temperature:0}`, `keep_alive:"5m"` and `0` on the final call to release memory. Per-call timeout 120 s (covers 11.5 s cold load); preflight GET `/api/version` 2 s. Transport: stdlib `urllib.request`.
+First sighting of every version is DEFER until the soak window passes, so a first run upgrades nothing from this list.
 
-Claude adapter (v1): `anthropic` 2.9.0, `client.messages.parse(...)` / `output_config.format` JSON schema (no forced tool_choice: it 400s on opus-5-5/sonnet-5-5), no sampling parameters, `output_config.effort="low"` (opus-5-5 cannot disable thinking), small `max_tokens`, handle `stop_reason=="refusal"` and typed errors (most-specific first). Include the server-side `fallbacks` beta per the API reference recommendation (open item: confirm exact form against live docs at implementation, the research pass did not run the SDK). Key via `fnox exec -- morning-brew run`; no key -> L3 disabled.
+Live-service set today (E2): started services are etcd, grafana, loki, prometheus, rabbitmq, valkey; vector and nats-server are live via user LaunchAgents although services say `none`.
 
-OpenAI-compatible adapter (stretch): one more `ModelClient` implementation for omlx and LM Studio using `/v1/chat/completions` + `response_format: json_schema`. Verified only against Ollama; thinking control differs (Ollama native uses `think:false`). Ship only after verifying omlx/LM Studio endpoints (Plan task S3).
+## 6. Decision unit: connected components [PANEL]
 
-Why not make the OpenAI-compatible endpoint the single interface: it works on Ollama but thinking suppression and structured-output behavior for omlx/LM Studio are unverified, and the consumer-defined `ModelClient` port makes it a one-file adapter later.
+Build the undirected graph over outdated formulae with edges from `runtime_dependencies` (after name validation). One HOLD, SKIP, DEFER or REPORT member makes the whole component non-eligible, with the member named in the reason. Each eligible component is upgraded in a single explicit `brew upgrade -- a b c`. `brew upgrade --dry-run` is retained only as a cross-check: if its closure includes a package outside the component or any non-eligible package, the component becomes a transient hold ("closure mismatch") and an anomaly is audited. No iterative dropping; dry-run output is not parsed as the primary mechanism. Bare `brew upgrade` is never run; `--` always precedes package arguments; an explicit upgrade of a pinned package is a pin conflict (not retried).
 
-## 7. Dependency closure and the post-hoc check (Tier-1 analogue)
+## 7. Triage: caveat diffing, then the chain
 
-Decision unit: the set of packages `brew` will actually change. Procedure:
+Caveat diffing is built first. Packages whose caveats are absent or hash-identical to the last-upgrade hash never reach a model. The model chain is sized from what is left (the GREY set). Fixed-outcome categories (unparseable, deprecated, high-dependent, live service) are rule HOLDs with zero model calls.
 
-1. Approved set A = UPGRADE verdicts (rules + model).
-2. `brew upgrade --dry-run --formula <A...>` (and `--cask` separately) -> parse the closure C (plan task S1 spikes the output format; fall back to computing the closure from `runtime_dependencies` if parsing proves brittle).
-3. For each member of C, re-run the rules (without models). If any member is HOLD/SKIP/REPORT or unjoinable, drop the A members that pull it in, record reason, and repeat (bounded loop).
-4. Only the final A is upgraded, individually, leaves first.
+Chain, for GREY members only [USER O2, O3; PANEL D4, D5]:
 
-Holding a dependency: pinning a dependency can break its dependents' upgrades, so the closure check also runs the other way: a dependent whose newer version requires a held dependency is held with reason "blocked by pinned dependency" (detected when the dry-run fails or reports a pin conflict). Delphi question 1.
+1. Deterministic `suspicious_text` flag on untrusted text (instruction-like phrases, delimiter lookalikes, control characters, over-length). Flag set -> HOLD (decided), no model call.
+2. Local classifier (qwen3:4b), optional: classifies caveat text into required booleans `mentions_migration`, `mentions_data_format`, `mentions_restart`, `mentions_manual_step`, `boilerplate_only`, emitted BEFORE `verdict` in the schema. Local output can only ADD risk: any risk boolean true -> HOLD (decided, reasoning stored labeled as derived from untrusted text). Local output never causes an upgrade. `think:false`, `num_predict` about 400, truncated or invalid JSON (one retry) -> unsure, which skips the local stage and goes to Claude with the deterministic flags (not a hold).
+3. Claude (L3), judging blind (facts and sanitized caveat only, never the local stage's reasoning). Schema: the same required booleans first, then `verdict: upgrade|hold`. Accepted as UPGRADE only if: all risk booleans false (or `boilerplate_only` true), `verdict == upgrade`, and the deterministic coverage check passes (a keyword scan of the caveat finds migration/data/restart/manual cues; each cue found must be reflected by the corresponding boolean). Any miss -> HOLD (decided) or unsure -> transient hold. No confidence field, no thresholds or caps.
+4. L3 is the only stage that may turn GREY into UPGRADE. No model may turn a HOLD, SKIP, DEFER or REPORT into UPGRADE. L3 runs even when Ollama is down. fnox fetch failure, refusal, timeout, rate limit -> transient hold.
+5. Mode: until the ship gate (section 11) is passed and the owner flips `chain.mode = live`, the chain runs in shadow mode: GREY members are held (transient, reason "shadow") while the would-be verdicts are audited.
 
-## 8. Pins, holds store, casks
+Prompt armoring: system prompt carries instructions; user message carries a fixed facts block plus untrusted fields wrapped in `<untrusted-{token_hex(8)}>` tags with collision stripping, 2000-char caps, redaction. Printed model reasoning is stripped of ANSI/control characters and labeled "derived from untrusted text".
 
-Holds store directory `~/.local/state/morning-brew/holds/<safe-name>.json`, written atomically (temp file + rename, phlegyas file_queue pattern). One file doubles as review queue and pin ledger. `pinned_by_tool` is true only if the package was unpinned when the tool pinned it; if `pinned` was already true, the record is SKIP and tool never writes a pin or ledger claim.
+Adapters: Ollama native `/api/chat` over stdlib `urllib` (`format` schema, `think:false`, keep_alive, 120 s per-call timeout for cold load). Model digests are pinned from `/api/tags`; digest mismatch -> local stage disabled, rules-only plus warning (Claude still runs). Warn if Ollama is bound off loopback (E6); the client only connects to loopback. Claude via `anthropic` 2.9.0 using `output_config.format` JSON schema (no forced tool_choice), no sampling params, `output_config.effort="low"`, refusal and typed errors handled most-specific-first. Default model `claude-sonnet-5-5`, configurable. Server-side `fallbacks` is a spike item (S6). No OpenAI-compatible adapter in v1.
 
-Lifecycle: absent -> held (pin) -> {approved -> released (unpin + upgrade), skipped_for_version(v) , re-triaged when current_version != held_at_version}.
+## 8. Live-process set [PANEL]
 
-Never-touch rule: `unpin` is only issued for records with `pinned_by_tool: true`.
+Union of: (a) brew-services status other than `none`; (b) formulae whose keg paths (opt/Cellar/bin, symlinks followed) match `ProgramArguments[0]` of any LaunchAgent/LaunchDaemon plist (user and system locations, parsed with `plistlib`); (c) formulae whose executables are currently running (path-matched against process list); plus the runtime-dependency closure of each member. All are HOLD and their old kegs are never cleaned by the tool. "Upgraded but old binary still running" is an expected status (E3), surfaced in `status`, and brew never restarts the service.
 
-Casks:
-- `brew pin --cask` exists in 7.0.14 (help text; `pinned`/`pinned_version` fields exist on both outdated and info cask JSON). Pin semantics were NOT exercised live (research pass was read-only).
-- `auto_updates: true` casks (7 of 8 outdated): pinning is documented as ineffective against self-update, and they only appear with `--greedy`. v1 policy: REPORT, no pin, no upgrade ([DESIGNER]; Delphi question 4 asks whether to upgrade them with `--greedy-auto-updates`).
-- `version :latest` casks: `--greedy-latest` off in v1.
-- pkg-installer casks may require sudo and would hang or fail under launchd: HOLD by rule (needs artifact check, S2).
-- Running apps: DEFER (FR-056). Terminal apps (ghostty, warp) are auto-updating and so are REPORT anyway.
+## 9. State, holds, reconcile
 
-## 9. Apply and verify
+State dir `~/.local/state/morning-brew/` mode 0700, files 0600; the config file is refused if group- or world-writable.
 
-- Never `brew upgrade` without arguments (FR-051). Commands run with an explicit env, `stdin=DEVNULL`, timeouts (default 30 min per package), `shell=False`, names validated against `^[A-Za-z0-9@._+\-/]+$`.
-- Per-package result recorded; failure keeps going; failed package is not auto-pinned, retried next run.
-- Verify via a second snapshot (FR-055).
-- `HOMEBREW_NO_INSTALL_CLEANUP=1` stops `brew upgrade` from cleaning implicitly, so cleanup policy is ours alone (see 11).
+- **Holds** (one atomic JSON file per package, temp file plus rename): `kind: decided | transient`, `held_at_version`, `reason`, `first_held`, `blocked_by` (component member), `model_reasoning` (labeled untrusted-derived), `skipped_for_version`. Decided holds are verdicts (rule HOLD, risk booleans, Claude hold). Transient holds are failures of machinery (fnox/Claude/Ollama down, closure mismatch, unjoinable, budget exceeded, network): they are excluded from this run, never counted against the owner in aging, and retried every run. The tool creates no pins.
+- Re-triage when `current_version` differs from `held_at_version`; a human skip applies to that version only.
+- **Reconcile at the start of every run:** compare `brew list --pinned` / outdated `pinned` against the ledger: an outdated package pinned by the user becomes SKIP; the ledger never claims a pin.
+- **Stamp** records `last_full_success` and `quality: full|degraded` (degraded if any transient hold occurred or a stage was down). The next hourly fire retries transient holds.
+- **Dead-man alarm:** `last_full_success` older than 48 hours is surfaced by every invocation and by `status` exit code.
+- **Hold aging:** every summary and `status` shows decided-hold count, oldest decided-hold age, and blocked-by-dependency count. Stale decided holds escalate (urgent notification); a weekly digest lists them.
+- Audit JSONL records `brew --version`, run id, package, rule id, stage, models (id and digest), booleans, final verdict, action result; stderr tails are redacted.
 
-## 10. Failure-mode matrix
+## 10. Apply, cleanup, failures
 
-| Failure | Detection | Behavior | Exit | Notification |
-|---|---|---|---|---|
-| `brew update` fails / no network / DNS down on wake | non-zero exit or timeout | retry with backoff (3 attempts), then abort before any mutation | 75 | yes: "update failed, will retry on next schedule" |
-| brew present but JSON unparseable | JSONDecodeError | abort run, log stdout/stderr tails | 1 | yes |
-| Third-party tap stderr noise (ngrok `postflight`) | stderr non-empty | ignored for control flow; logged debug | n/a | no |
-| Candidate not joinable across outputs | missing key | HOLD "unjoinable" | 0 | in summary |
-| Ollama not running | preflight GET fails | rules-only: GREY -> HOLD "model unavailable"; Claude only if `claude_when_local_down` | 0 | summary flags "degraded" |
-| Ollama cold load slow | call duration | per-call timeout 120 s; run budget 20 min | 0 | no |
-| Model returns invalid schema | pydantic validation | one retry, then unsure -> next stage | 0 | no |
-| Model contradicts facts | claim-check | unsure -> escalate | 0 | audit only |
-| Claude key missing | fnox/env absent | L3 disabled, logged | 0 | summary flags |
-| Claude unavailable / rate limited / refusal / timeout | typed SDK errors, `stop_reason` | unsure -> HOLD | 0 | summary |
-| Partial upgrade failure | non-zero exit per package | record failed, continue, retry next run | 0 (1 if all failed) | yes, names packages |
-| Held package changed as side effect | post-verify | anomaly record, error log | 0 | urgent |
-| Concurrent run | flock fails | exit immediately | 75 | no |
-| Run already succeeded this slot | stamp | no-op | 0 | no |
-| Notifier raises | exception in adapter | swallowed and logged | unchanged | n/a |
-| Machine asleep at schedule | launchd | coalesced run on wake (man page); stamp + RunAtLoad cover power-off | n/a | n/a |
-| Network not yet up at wake | update failure | covered by retry + second schedule fire | 75 | yes |
-| sudo prompt (pkg cask) | pre-empted by rule | HOLD; subprocess has no stdin and times out otherwise | 0 | summary |
-| Disk full / state dir unwritable | OSError | abort before mutation if audit/holds cannot be written | 1 | say fallback |
+- Subprocesses: argv lists only, `shell=False`, `stdin=DEVNULL`, timeouts, child environment from an explicit allowlist (PATH including `/opt/homebrew/bin`, HOME, `HOMEBREW_NO_AUTO_UPDATE`, `HOMEBREW_NO_ANALYTICS`, `HOMEBREW_NO_ENV_HINTS`, `HOMEBREW_NO_INSTALL_CLEANUP`). A test asserts no notifier child env contains `*KEY*` or `*TOKEN*`.
+- Component fails -> recorded failed, run continues, retried next run; not held, not pinned.
+- Verify: re-snapshot; held/skipped packages must be unchanged; violations are anomalies (urgent).
+- Cleanup (O4): after 2 full successful runs, per-package `brew cleanup <pkg>` for packages upgraded by those runs, never for the live-process set. `HOMEBREW_NO_INSTALL_CLEANUP=1` keeps `brew upgrade` from cleaning implicitly. README documents manual rollback (no automated rollback; zero rollback window today, E8).
 
-## 11. Cleanup decision (D16)
+Failure matrix (each row also in SPEC):
 
-`brew cleanup` removes the previous keg versions of formulae, deleting the rollback path for today's upgrades. User asked for cleanup after upgrades; the designer proposes the deferred form: per-package `brew cleanup <pkg>` for packages upgraded at least N successful runs ago (default N=2), while `HOMEBREW_NO_INSTALL_CLEANUP=1` prevents implicit cleanup. `cleanup.mode = "immediate"` gives the literal behavior. Alternative: also bare `brew cleanup -s`/`--prune` for download cache only (cache pruning does not remove kegs). Delphi question 5.
+| Failure | Behavior | Hold kind |
+|---|---|---|
+| `brew update` fails / no network | abort before mutation, exit 75 (log marker), hourly fire retries | n/a (degraded stamp) |
+| JSON unparseable | abort, exit 1 | n/a |
+| Unjoinable candidate | exclude component | transient |
+| Ollama down | local stage skipped; Claude still runs | none |
+| Ollama digest mismatch | local stage disabled, warn | none |
+| fnox fetch fails (10 s timeout) / Claude refusal, timeout, rate limit | GREY member excluded this run | transient |
+| Model contradicts coverage check | HOLD | decided |
+| Closure cross-check mismatch | component excluded, anomaly audited | transient |
+| Partial upgrade failure | record, continue, retry next run | none |
+| Held package changed as side effect | anomaly, urgent notification | n/a |
+| Concurrent run | exit immediately (75) | n/a |
+| Already ran today / before earliest hour | no-op, exit 0 | n/a |
+| Notifier raises | swallowed | n/a |
+| State dir unwritable | abort before mutation, exit 1 | n/a |
+| Run budget (20 min) exceeded | remaining GREY members excluded | transient |
 
-## 12. launchd
+## 11. Evaluation: golden set, shadow mode, ship gate [PANEL, trimmed]
 
-- Plist `~/Library/LaunchAgents/<label>.plist` generated by `morning-brew install`: `Label`, `ProgramArguments` = [fnox-or-direct wrapper, uv-run command], `StartCalendarInterval` as an array of two dicts (morning slot, later fallback slot), `RunAtLoad` true, `StandardOutPath`/`StandardErrorPath` = `~/Library/Logs/morning-brew/`, `EnvironmentVariables` with explicit PATH (`/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin`), `ProcessType` Background, `LowPriorityIO` true.
-- Semantics (verified from man page): missed fire while asleep runs on wake, multiple missed intervals coalesce into one. Not verified and not claimed: catch-up after full power-off (RunAtLoad + stamp guard cover it at next login). StartCalendarInterval and StartInterval are independent.
-- A LaunchAgent only runs while the user is logged in (general launchd behavior, not tested here); `say` also needs the user session.
-- Retry on early-wake no-network is handled in-process (backoff) and by the later schedule fire; the stamp prevents duplicates.
-- Install/uninstall via `launchctl bootstrap|bootout gui/<uid>`.
-- Open: `fnox exec` non-interactive behavior under launchd (keychain/age unlock) is unverified. If it fails the tool runs without L3 and says so.
+- Golden set of about 25-30 cases: real caveats from this machine, plus dangerous (data-loss, migration, restart) and prompt-injection synthetics, run against the real configured models. Reuse the audit JSONL format; `morning-brew eval` is a thin runner, not a separate harness.
+- Shadow mode for the first ~10 runs: model-origin approvals are audited as would-be decisions but not applied.
+- Ship gate: 0 false approves on the actionable and injection subsets. Only then may the owner set `chain.mode = live`. Rules-based UPGRADE-ELIGIBLE components are not gated by this (they involve no model).
 
-## 13. Notifications
+## 12. launchd and secrets
 
-`Notifier` port: `notify(Summary) -> None`, never raises. Adapters: `SayNotifier` (`say` via argv; phrase built from counts, not raw text), `OsaScriptNotifier` (phlegyas pattern, escaped), `CommandNotifier` (user-supplied argv, summary JSON on stdin). The Hue/home-notify path is reachable from Claude Code through an MCP bridge; whether a plain launchd Python process can reach it is unverified, so it is only expressible via `CommandNotifier` pointing at a user script. Fan-out wrapper swallows exceptions.
+- Plist runs `.venv/bin/morning-brew run` directly (installed with `uv sync --frozen`, not `uv run`), `StartInterval` 3600, no `RunAtLoad`, explicit PATH and env, `StandardOutPath`/`StandardErrorPath` under `~/Library/Logs/morning-brew/`, `ProcessType` Background. The earliest-hour gate and once-per-day stamp live in the tool. A LaunchAgent only runs while the user is logged in.
+- No `fnox exec` wrapper. The Claude key is fetched lazily with `fnox get` (`stdin=DEVNULL`, 10 s timeout) only when L3 is reached, handed to the SDK client, and never placed in `os.environ`. Whether `fnox get` works non-interactively under launchd is unverified (spike S4); failure is a transient hold.
 
-## 14. Configuration
+## 13. Notifications [PANEL]
 
-`~/.config/morning-brew/config.toml` (tomllib): stages and model ids, thresholds, caps, budgets and timeouts, `claude_when_local_down`, cleanup mode and N, notifiers, schedule times, state dir. Defaults live in code. Secrets are never in config.
+Default: a silent macOS notification (no sound) written through `osascript` with the message passed as an argument to an `on run argv` handler (no string interpolation) plus a status file `~/.local/state/morning-brew/status.txt`. `say` and a user-supplied command notifier (Hue) fire only for urgent events (anomalies, dead-man alarm, stale holds). Quiet hours suppress non-urgent output. Weekly holds-aging digest. Notifier failures are swallowed.
 
-## 15. Package layout (proposed)
+## 14. Configuration (tomllib)
+
+`earliest_hour`, `min_age_days`, `trusted_taps`, `chain.mode` (shadow|live), local model id and pinned digest, Claude model id and effort, run budget, cleanup runs (2), notifier set, quiet hours. Secrets never in config.
+
+## 15. Layout
 
 ```
 src/morning_brew/
-  cli.py                  # argparse: run | review | status | explain | install | uninstall
-  orchestrator.py ports.py domain.py versions.py rules.py closure.py
+  cli.py orchestrator.py ports.py domain.py versions.py rules.py components.py liveprocess.py
   brew/{runner.py,parse.py,snapshot.py}
-  triage/{chain.py,prompt.py,schemas.py,claims.py,ollama.py,claude.py}
-  store/{holds.py,audit.py,stamp.py,lock.py}
+  triage/{caveats.py,suspicious.py,prompt.py,schemas.py,coverage.py,chain.py,ollama.py,claude.py,golden/}
+  store/{holds.py,audit.py,stamp.py,lock.py,firstseen.py}
   notify.py sanitize.py config.py launchd.py
-tests/ (fixtures: sanitized captures of the real JSON shapes above)
 ```
 
-## 16. Security notes
+## 16. Security notes and blast radius
 
-- Subprocess: argv lists only, validated names, no shell, no inherited secrets other than what the stage needs.
-- Untrusted text never flows into subprocess args, `say`, or logs unsanitized.
-- API key never logged; audit redaction applies to rationale text.
-- Models cannot approve anything rules held; a compromised/misled model's worst case is a GREY-category upgrade of a patch/minor non-service package.
+- Models can only add risk, except one narrow path: Claude (L3) may turn a GREY member into ELIGIBLE, and only when the member already passed every deterministic rule (not live-process, trusted tap, arm64 bottle, not major, soaked at least `min_age_days`, not self-dependency, component otherwise clean), the `suspicious_text` flag is clear, all risk booleans are false and the coverage check passes, and only after the ship gate and shadow period. No model can turn a HOLD, SKIP, DEFER or REPORT into UPGRADE.
+- The worst case from a misled or injected L3 is therefore the upgrade of one soaked, rule-clean package whose caveats changed or whose version is 0.x minor. That is a narrower surface than the rules-only UPGRADE class (revision/patch/minor with no flags), which involves no model at all and is the larger exposure.
+- A hallucinating local classifier can only produce extra holds (observed E5).
+- Untrusted text never reaches subprocess args, notification strings (except sanitized and control-stripped), or logs unsanitized. The API key is never in the environment, plist, config, or logs.
 
-## 17. Open items needing a spike (not resolved by research)
+## 17. v1.1 candidates and design input
 
-S1 `brew upgrade --dry-run` output format; S2 cask `artifacts` shape (pkg vs app, process names); S3 omlx / LM Studio structured output behavior; S4 `fnox exec` under launchd; S5 live `brew pin --cask` behavior on a throwaway cask (needs user consent); S6 Anthropic SDK 2.x structured-output call and `fallbacks` form against live docs.
+- Casks apply path. Panel S4 findings are the design input: `--no-quit`; DEFER when the app is running; naming a cask bypasses auto_updates protection; plain `outdated` already lists auto_updates casks and `--greedy` entries are stale; widen the HOLD rule to installer/uninstall/flight artifacts (not just pkg).
+- OpenAI-compatible adapter for omlx / LM Studio (verified for Ollama only).
+- Changelog / release-note fetching (`gh release view` for GitHub-hosted formulae), through the same sanitizer and suspicious-text flag.
+
+## 18. Open spikes
+
+S4: `fnox get` non-interactive under a throwaway launchd job. S6: Anthropic SDK 2.x structured output, refusal handling and `fallbacks` form against live docs. (Former S1/S2/S3/S5 are retired by panel evidence or by the cask scope cut.)

@@ -1,92 +1,103 @@
 # DECISION: brew-triage
 
-**Version:** 1.0 (Pre-Delphi)
+**Version:** 1.1 (Post-Delphi)
 **Date:** 2026-11-17
-**Changes:** Initial decision record
+**Changes:** Decision table updated for Delphi outcomes and owner decisions O1-O4; scope tightened (casks report-only); added "Post-Delphi changes" and v1.1 candidates.
 
-Note: no `.specify/memory/constitution.md` exists in this repo. The user's global CLAUDE.md (TDD, consumer-defines-interface, fnox for secrets, structured logging, Fibonacci estimates, no emojis) acts as the constitution for this feature.
+Note: no `.specify/memory/constitution.md` exists in this repo. The user's global CLAUDE.md (TDD, consumer-defines-interface, fnox for secrets, structured logging, Fibonacci estimates, no emojis) acts as the constitution.
 
-## Legend: who decided what
+## Legend
 
-- **[USER]** decided by the user. The Delphi panel may note risks but should not overturn these without going back to the user.
-- **[DESIGNER]** a call made by the designing agent. Open to challenge.
+- **[USER]** decided by the owner. **[PANEL]** settled by the Delphi review (unanimous or 4/5). **[DESIGNER]** designer's call, still open to challenge. **[DESIGNER-READING]** the designer's interpretation of an owner statement.
 
 ## 1. Use case
 
-`brew update`, `brew upgrade`, `brew cleanup` should run automatically each morning. In theory a human reviews `brew outdated` before upgrading; in practice that never happens, so upgrades are either skipped for months or run blind. A small local model (plus escalation) does the triage the human skips: it upgrades what is clearly safe, holds what is not, and reports the holds.
+`brew update`, `brew upgrade`, `brew cleanup` should run automatically each morning. A human is supposed to review `brew outdated` first; in practice that never happens. Deterministic rules plus a small local model and Claude do the triage the human skips: upgrade what is clearly safe, hold what is not, report the holds.
 
 ## 2. Business value
 
-- Machine stays current without the human reading `brew outdated`.
-- The packages that actually bite (services such as redis/rabbitmq/postgres, major bumps, caveat-bearing formulae) are held and surfaced instead of silently upgraded.
-- Every decision is auditable (JSONL) and reversible via pin ledger.
-- Cost is near zero: rules settle most packages with no model call; local models are free; Claude is the last resort.
+- The machine stays current without reading `brew outdated`.
+- Packages that bite (running services, major bumps, non-core taps, changed caveats) are held and surfaced.
+- Every decision is audited (JSONL). The tool creates no pins; holds are an exclusion list the owner can see in `status`.
+- Cost is near zero: rules settle most packages with no model call.
 
-Observed workload (2026-11-17, Homebrew 7.0.14): 21 formulae (4 are dependencies, not leaves) + 8 casks outdated under `--greedy` (1 under plain `brew outdated`), 273 leaves, 30 casks, 30 formulae with a `service` block. Hand-applying the DESIGN.md rules to the 21 formulae gives 13 UPGRADE, 4 GREY (needs a model), 3 HOLD, 1 SKIP (user-pinned redis). I.e. roughly 80 percent settled by rules alone. (Hand-derived, not executed.)
+Observed workload (2026-11-17, Homebrew 7.0.14): 21-22 formulae and 1 cask outdated in plain mode (8 casks under `--greedy`, mostly stale metadata), 273 leaves, 30 formulae with a `service` block.
 
 ## 3. Decision table
 
-| # | Decision | By | Open to challenge? |
-|---|----------|----|--------------------|
-| D1 | Autonomy "option 2": auto-upgrade clearly safe, HOLD (pin) the rest and report. Not recommend-only, not upgrade-all | USER | No |
-| D2 | Advisor escalation modeled on Claude Code advisor pattern: small local model first pass, local larger model as advisor, frontier Claude when judgment is genuinely needed. Claude path configurable; key via fnox | USER | No (mechanics of escalation triggers are DESIGNER, see D11) |
-| D3 | Platform: Python + uv + launchd | DESIGNER (user accepted) | Mildly |
-| D4 | Borrow ideas from phlegyas (layered gate, post-hoc re-check, prompt armoring, JSONL audit, file queue, notifiers) | USER | No |
-| D5 | Deterministic rules first and always win; models can never approve what rules held | DESIGNER | Yes |
-| D6 | Per-category confidence caps | DESIGNER | Yes (values are tunable) |
-| D7 | Untrusted-input hardening for caveats/descriptions (random delimiters, caps, system/user separation, structured output) | DESIGNER | Yes |
-| D8 | `morning-brew review` CLI to approve/skip holds | DESIGNER | Yes |
-| D9 | Notifications pluggable, never fail the job | DESIGNER | Yes |
-| D10 | `brew cleanup` after upgrades. Mechanism (immediate vs deferred) is open, see D16 | USER intent, DESIGNER mechanism | Yes |
-| D11 | Escalation uses more than self-reported confidence (see D17) | DESIGNER | Yes |
-| D12 | Decision unit and closure check via `brew upgrade --dry-run` | DESIGNER | Yes |
-| D13 | Pin ownership ledger (tool-owned vs user-owned pins; never touch user pins) | DESIGNER | Yes |
-| D14 | Casks: `auto_updates true` casks are report-only (not upgraded, not pinned) in v1; non-auto-update casks go through the same pipeline; pkg-installer casks held | DESIGNER | Yes |
-| D15 | Model interface: consumer-defined `Triage` port; native Ollama adapter v1; OpenAI-compatible adapter (omlx, LM Studio) is a stretch goal | DESIGNER | Yes |
-| D16 | Cleanup deferred by N successful runs (default 2) to preserve a rollback window; config can set immediate | DESIGNER | Yes (strong candidate) |
-| D17 | Escalate on: low confidence, any risk flag, failed claim-check, or L1/L2 disagreement | DESIGNER | Yes |
-| D18 | v1 scope excludes changelog/release-note fetching (see section 5) | DESIGNER | Yes |
-| D19 | Dependencies: stdlib `urllib` for Ollama, `argparse`, `tomllib`, `logging`; `pydantic` for schemas; `anthropic` as optional extra | DESIGNER | Yes |
+| # | Decision | By | Status after Delphi |
+|---|----------|----|---------------------|
+| D1 | Autonomy "option 2": upgrade clearly safe, hold the rest, report. | USER | CHANGED by owner O1: HOLD = exclude from the explicit upgrade list and record in the ledger; the tool creates no pins. Existing user pins (redis, deliberate) are SKIP and never touched. [DESIGNER-READING of "we don't generally pin anything"] |
+| D2 | Advisor escalation: small local model first, frontier Claude when judgment is needed; Claude path configurable; key via fnox | USER | REFINED by O2/O3: one local model (qwen3:4b) classifies caveats only and may add risk, never remove it; Claude (L3) is in v1, runs even when Ollama is down, and is the only stage that can approve a GREY case. glm-4.7-flash dropped |
+| D3 | Python + uv + launchd | DESIGNER (accepted) | Stands. Plist runs the venv binary directly, `StartInterval` 3600, no `RunAtLoad` [PANEL] |
+| D4 | Borrow phlegyas ideas | USER | Stands |
+| D5 | Rules first and always win | DESIGNER | Hardened [PANEL]: models may only add risk, except L3 narrowly approving GREY |
+| D6 | Per-category confidence caps | DESIGNER | REMOVED [PANEL]: models emit required risk booleans before the verdict plus a coverage check; fixed-outcome categories became rule HOLDs |
+| D7 | Untrusted-input hardening | DESIGNER | Stands, plus deterministic `suspicious_text` flag, control-char stripping |
+| D8 | `review` CLI | DESIGNER | Stands, slimmed: approve = upgrade component now; skip = per version |
+| D9 | Pluggable notifications | DESIGNER | CHANGED [PANEL]: silent notification plus status file by default; `say`/Hue for urgent only; quiet hours; weekly digest |
+| D10 | `brew cleanup` after upgrades | USER intent | Decided by owner O4: deferred after 2 full successful runs, never cleaning kegs in the live-process set |
+| D11 | Escalation signals | DESIGNER | Replaced: no self-reported confidence; booleans + coverage + suspicious flag |
+| D12 | Decision unit and closure | DESIGNER | CHANGED [PANEL]: undirected connected components; dry-run only a cross-check; no bounded drop-iteration |
+| D13 | Pin ownership ledger | DESIGNER | REMOVED by O1 (no pins). Reconcile reduces to detecting user pins |
+| D14 | Cask policy | DESIGNER | CHANGED [PANEL 5/5]: all casks report-only in v1 |
+| D15 | Model interface | DESIGNER | Consumer-defined port; native Ollama adapter; OpenAI-compatible adapter CUT to v1.1 |
+| D16 | Deferred cleanup | DESIGNER | Confirmed by owner O4 |
+| D17 | Self-deps reported, not upgraded in-run | PANEL | New |
+| D18 | No changelog fetching in v1 | DESIGNER | Stands; v1.1 candidate |
+| D19 | Dependencies: urllib, argparse, tomllib, logging, pydantic, anthropic extra | DESIGNER | Stands. `fnox exec` wrapper removed; lazy `fnox get` |
+| D20 | Live-process set (services + LaunchAgents/Daemons + running exes + dep closure) = HOLD | PANEL | New |
+| D21 | Non-core tap = HOLD unless `trusted_taps`; soak `min_age_days` 3 for all packages | PANEL | New |
+| D22 | Caveat diffing before any model | PANEL | New (baseline seeded at setup is DESIGNER) |
+| D23 | Decided vs transient holds; reconcile; 48 h dead-man; hold aging | PANEL | New |
+| D24 | Golden set (~25-30), shadow mode ~10 runs, ship gate 0 false approves | PANEL | New |
 
 ## 4. Approaches considered
 
-1. **Python / uv / launchd (chosen).** Matches the user's handzoo and phlegyas stack; phlegyas sanitizer/prompt-armoring/queue ideas reuse directly; the rules layer is pure functions, trivially unit-testable; LLM retry/schema handling is easy.
-2. **bash + jq (rejected).** Adequate for the brew plumbing, but JSON schema enforcement, LLM retry/timeouts, escalation logic and tests all get painful once there is a judgment step.
-3. **homebrew/autoupdate tap (rejected).** Blind upgrade with no triage hook, i.e. the option the user rejected. We may borrow its launchd approach.
-4. (Noted, not scored) C# is viable given the user's .NET background; Python chosen for phlegyas reuse and uv single-file ergonomics.
+1. **Python / uv / launchd (chosen).** Matches the user's handzoo and phlegyas stack; sanitizer and prompt-armoring ideas reuse directly; the rules layer is pure and testable; schema and retry handling are easy.
+2. **bash + jq (rejected).** JSON schema enforcement, LLM retry/timeouts, escalation logic, and tests get painful once there is a judgment step.
+3. **homebrew/autoupdate tap (rejected).** Blind upgrade with no triage hook, the option the user rejected; may borrow its launchd approach.
+4. (Noted) C# is viable given the user's .NET background; Python chosen for phlegyas reuse.
 
 ## 5. Scope
 
 ### In v1
-- Formulae and casks; `brew update` -> snapshot -> triage -> pin/upgrade -> verify -> deferred cleanup.
-- Rules layer, version classifier, local first-pass + local advisor + Claude escalation, rules-only degraded mode.
-- Holds store (also the review queue and pin-ownership ledger), JSONL audit log, `review` CLI.
-- launchd plist generator/installer, logging, lockfile, notifiers.
+Formulae: update, snapshot, rules, components, caveat-diff triage, local classifier and Claude, apply, verify, deferred cleanup. Holds ledger, audit JSONL, `review`, `status`, `explain`, `eval`, `install`. Casks are reported only.
 
-### Out of v1 (explicit)
-- **Changelog / release-note fetching.** Inputs are brew metadata only (version delta, caveats, service, dependents, deprecation flags, tap, desc). Rationale: (a) most of the risk signal is structural (major bump, service, dependents) and already in brew JSON; (b) release notes are a large untrusted-text injection surface; (c) fetching needs per-formula homepage/GitHub resolution (`urls.stable.url` is often a GitHub URL, observed for abctl) and `gh` auth under launchd. Plan: v1.1 optional `gh release view` for GitHub-hosted formulae, behind a flag, wrapped by the same sanitizer.
-- Upgrading `auto_updates true` casks (they self-update; pinning does not stop that per `brew pin --help`). Reported only.
-- `--greedy-latest` casks (`version :latest`). None installed today (checked: 0 of 30). Reported only if ever present.
-- Mac App Store (`mas`), pip/npm/cargo, Brewfile management.
-- Windows/Linux.
-- Auto-rollback of failed upgrades.
+### Out of v1
+Cask upgrades; OpenAI-compatible adapter; changelog fetching; automated rollback (README rollback procedure only); `mas`/pip/npm; non-macOS.
 
-## 6. Dependency evaluation (each vs at least two alternatives)
+## 6. Post-Delphi changes (summary)
+
+Five panelists (homebrew-ops, llm-judge, security, reliability, pragmatist), two rounds; verdict SHIP-WITH-CHANGES. Estimated v1 about 95-108 points versus 127 designed.
+
+- Dropped: confidence/caps/threshold scheme; bounded drop-iteration and dry-run parsing as primary; glm advisor; OpenAI-compatible adapter; cask apply path; pin creation/ownership/unpin; `fnox exec` plist wrapper; two calendar slots plus `RunAtLoad`; `say` by default.
+- Added: connected-component decision unit; live-process set; tap trust and soak; caveat diffing; boolean risk schema with coverage check; decided vs transient holds; reconcile and dead-man alarm; hold aging; golden set and shadow mode; env allowlist and lazy `fnox get`.
+- Owner decisions: O1 exclude-never-pin; O2 Claude in v1 even when Ollama is down, fnox failure is transient; O3 one local model; O4 deferred cleanup after 2 full successful runs.
+- Corrected: the redis pin is deliberate (redis stays installed while valkey runs in its place) and is not evidence of hold rot.
+
+## 7. v1.1 candidates (design input recorded)
+
+- **Cask apply path.** Panel S4 findings: pass `--no-quit` and DEFER when the app is running (brew quits running apps by default); naming a cask bypasses auto_updates protection; plain `outdated` already lists auto_updates casks while `--greedy` entries are stale Caskroom metadata; widen the HOLD rule from pkg-installer to installer/uninstall/flight artifacts.
+- **OpenAI-compatible adapter** for omlx / LM Studio (verified for Ollama only; thinking control differs).
+- **Changelog / release-note fetching** via `gh release view` for GitHub-hosted formulae, behind a flag, through the same sanitizer and suspicious-text flag.
+
+## 8. Dependency evaluation
 
 | Concern | Chosen | Alternatives | Why |
 |---------|--------|--------------|-----|
-| Ollama HTTP | stdlib `urllib.request` | `httpx` 0.28.1 (released 2024-12-06, about 2 years old: red flag by the user's rule; `anthropic` 2.9.0 now depends on `httpx2`, observed in PyPI `requires_dist`, not `httpx`); `ollama` python 0.6.3 (extra dep, thin wrapper) | Solution preference #1 (built-in). Calls are 3 JSON POSTs per run; no streaming needed |
-| Output validation / JSON schema | `pydantic` 2.14.3 | stdlib dataclasses + hand-rolled validation; `msgspec` | Already a transitive dep of `anthropic`; generates the JSON schema for both Ollama `format` and Claude `output_config.format`; phlegyas already uses it |
-| Claude client | `anthropic` 2.9.0 (released 2026-11-16), optional extra `[claude]` | raw `urllib` POST to `/v1/messages`; OpenAI-compat shim | Official SDK is the supported path (the `claude-api` skill forbids raw HTTP when an SDK exists); optional so the core has no network SDK |
-| CLI | `argparse` | `click`; `typer` | Four subcommands; stdlib suffices |
-| Config | `tomllib` (stdlib, 3.11+) | YAML (`pyyaml`); env vars only | No dep; matches `requires-python >= 3.11` |
-| Logging | stdlib `logging` (+ small JSON formatter) | `structlog`; `loguru` | No dep; user rule: structured logging, no print in library code. Audit trail is a separate JSONL writer |
-| Tests | `pytest` (dev) | `unittest` | Matches phlegyas; fixtures/parametrize suit classifier tables |
-| Secrets | `fnox exec --` wrapper for the key | env in plist (rejected: secret on disk in plaintext); macOS Keychain `security` CLI | User convention. Whether `fnox exec` works non-interactively under launchd is UNVERIFIED (see DESIGN open items) |
-| Scheduler | launchd LaunchAgent | cron (skips runs while asleep; man page contrast verified); `brew autoupdate` | See DESIGN section on launchd |
+| Ollama HTTP | stdlib `urllib.request` | `httpx` 0.28.1 (2024-12-06, red flag; `anthropic` 2.9.0 uses `httpx2`); `ollama` 0.6.3 | Built-in first; a handful of JSON POSTs |
+| Validation / schema | `pydantic` 2.14.3 | dataclasses + manual; `msgspec` | Transitive dep of `anthropic`; emits JSON schema for both providers |
+| Claude client | `anthropic` 2.9.0, optional extra | raw HTTP; OpenAI shim | Official SDK; optional so the core stays dependency-light |
+| CLI | `argparse` | `click`; `typer` | A handful of subcommands |
+| Config | `tomllib` | YAML; env only | stdlib |
+| Logging | stdlib `logging` | `structlog`; `loguru` | no dep |
+| Tests | `pytest` | `unittest` | phlegyas parity |
+| Secrets | lazy `fnox get` | `fnox exec` wrapper in plist (removed, secret would sit in environment); Keychain CLI | Key never in `os.environ`; non-interactive behavior under launchd unverified (spike S4) |
+| Scheduler | launchd `StartInterval` | cron; `brew autoupdate` | Retries come free; no RunAtLoad network race |
 
-## 7. Risks accepted
+## 9. Risks accepted
 
-- Small model mis-reasons (observed: qwen3:4b said "leaf = no dependencies" at 0.95 self-reported confidence). Mitigated by rules-win, claim-checking, two-model agreement, caps. Residual: grey-area upgrade that breaks something. Mitigation: deferred cleanup preserves rollback kegs.
-- Upgrading while apps/services run.
-- Launchd jobs only run in a logged-in user session.
+- L3 approval of a GREY case that passed every rule remains a (narrow) model-dependent upgrade; mitigated by shadow mode and the ship gate.
+- Rollback window is zero today; deferred cleanup helps only for packages that do not run live.
+- Launchd jobs run only while the user is logged in.

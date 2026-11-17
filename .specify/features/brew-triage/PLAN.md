@@ -1,92 +1,86 @@
 # PLAN: brew-triage
 
-**Version:** 1.0 (Pre-Delphi)
+**Version:** 1.1 (Post-Delphi)
 **Date:** 2026-11-17
-**Changes:** Initial implementation plan
+**Changes:** Re-cut after the Delphi review and owner decisions. Spikes S1, S2, S3, S5 retired (answered by panel evidence or scope cuts). Added caveat diffing before the model chain, live-process set, components, tap trust and soak, golden set and shadow mode, transient vs decided holds, reconcile and dead-man, hold aging, lazy fnox get. Cut OpenAI adapter, cask apply, pin machinery.
 
-Nothing here is to be started until the Delphi review completes. Points are Fibonacci complexity points (1, 2, 3, 5, 8, 13). No time estimates. All items are [DESIGNER] sequencing; the TDD and top-down (consumer-defines-interface) ordering is [USER] policy.
+Points are Fibonacci complexity points; no time estimates; no task at 21 or more. Ordering is TDD and top-down: the orchestrator's tests define the ports, lower layers implement them. Nothing starts until the owner approves v1.1.
 
-## Ordering principle
-
-Work from the top: the CLI and orchestrator are written first against fakes; the orchestrator's tests define the ports (BrewPort, Triage, HoldStore, AuditSink, Notifier, Clock, Lock). Each lower layer is then implemented to satisfy a port that already exists. Every task: write failing test, implement, refactor. Real brew/Ollama/Claude appear only in the final adapter layer and opt-in integration tests.
-
-## Spikes (read-only, gate later tasks)
+## Spikes (still open)
 
 | ID | Task | Pts | Gates |
 |----|------|-----|-------|
-| S1 | Capture `brew upgrade --dry-run` output for formula and cask; decide parse vs compute-from-deps closure | 3 | T11 |
-| S2 | Inspect cask `artifacts` JSON (pkg vs app, process names) across the 28 installed casks | 2 | T07, T12 |
-| S3 | Probe omlx and LM Studio structured output endpoints and thinking control | 3 | T24 (stretch) |
-| S4 | Test `fnox exec` non-interactively under a throwaway launchd job | 3 | T21 |
-| S5 | `brew pin --cask` / unpin on a throwaway cask, with the user's consent | 2 | T10 |
-| S6 | Anthropic SDK 2.x: `messages.parse` / `output_config.format`, `refusal`, `fallbacks` form, verified against live docs | 3 | T19 |
+| S4 | `fnox get` non-interactively under a throwaway launchd job (stdin closed, 10 s timeout) | 3 | T20, T21 |
+| S6 | Anthropic SDK 2.x: structured output via `output_config.format`, refusal and typed-error handling, `fallbacks` form, against live docs | 3 | T20 |
 
-## Phase 0: project skeleton (after Delphi)
-
-| ID | Task | Pts |
-|----|------|-----|
-| T00 | `uv init` package layout, pytest config, ruff, `anthropic` as optional extra, sanitized JSON fixtures captured from real brew output (names kept, no secrets) | 3 |
-
-## Phase 1: top of the stack (defines the ports)
-
-| ID | Task (test first) | Pts | Depends |
-|----|-------------------|-----|---------|
-| T01 | Orchestrator happy path with fakes: ordering update -> snapshot -> triage -> apply -> verify -> cleanup -> notify -> stamp (FR-005). Defines all ports | 5 | T00 |
-| T02 | Orchestrator failure matrix: update failure (exit 75), partial upgrade failure, notifier raising, budget expiry, verify anomaly (FR-055, 060, 063, 064, 065) | 5 | T01 |
-| T03 | Run lifecycle: lock, stamp guard, dry-run flag makes zero mutations (FR-001..003, 083) | 3 | T01 |
-| T04 | CLI shell (argparse): run, status, explain, review wiring with fakes; exit codes | 3 | T01 |
-
-## Phase 2: domain core (pure, fast tests)
+## Phase 0: skeleton
 
 | ID | Task | Pts | Depends |
 |----|------|-----|---------|
-| T05 | Version/bump classifier with the full SPEC FR-020 fixture table | 3 | T01 |
-| T06 | Candidate facts derivation from snapshot incl. `full_name` join, tap formulae, dependents inversion, unjoinable handling (FR-010, 012) | 5 | T05 |
-| T07 | Rules table + all branches + dependents threshold + property test "rules always win" (FR-030..032) | 5 | T06, S2 |
-| T08 | Closure check loop with fake dry-run closures (FR-050) | 5 | T07, S1 |
-| T09 | Hold ledger semantics: pin ownership, re-triage on version change, skipped-for-version, user pin never touched (FR-053, 054, 082) | 5 | T07 |
+| T00 | `uv` package layout, pytest, ruff, `anthropic` optional extra, sanitized fixtures (outdated/info/services JSON with tap formulae, ngrok stderr noise, panel-evidence cases: vector LaunchAgent, rabbitmq/erlang, aws trio component) | 3 | |
+
+## Phase 1: top of the stack
+
+| ID | Task (test first) | Pts | Depends |
+|----|-------------------|-----|---------|
+| T01 | Orchestrator happy path with fakes; defines all ports; asserts "triage completes before apply" (FR-005, 006) | 5 | T00 |
+| T02 | Orchestrator failure matrix: update failure exit 75, partial component failure, anomaly on verify, closure mismatch, budget expiry, transient vs decided outcomes, notifier raising (FR-041..043, 066) | 5 | T01 |
+| T03 | Run lifecycle: lock, earliest-hour and once-per-day gate, stamp with `quality`, dead-man 48 h, `--dry-run` zero mutations (FR-001, 002, 063, 081) | 5 | T01 |
+| T04 | CLI shell: run, status, explain, review wiring with fakes, exit codes, ANSI/control stripping (FR-081) | 3 | T01 |
+
+## Phase 2: domain core
+
+| ID | Task | Pts | Depends |
+|----|------|-----|---------|
+| T05 | Version/bump classifier with the full FR-020 table | 3 | T01 |
+| T06 | Facts derivation: `full_name`/token join, tap, bottle arch, dependents inversion, unjoinable -> transient (FR-010, 012) | 5 | T05 |
+| T07 | Component builder from `runtime_dependencies` with name validation; one non-eligible member blocks the component (FR-004, 040) | 3 | T06 |
+| T08 | Rules table: all 12 rules, tap trust, soak, property test "models never change non-GREY" (FR-030, 033) | 5 | T06, T10 |
+| T09 | Live-process set: services, LaunchAgent/Daemon `ProgramArguments[0]` with symlinks, running executables, dependency closure; keg-clean exclusion (FR-031) | 5 | T06 |
+| T10 | Caveat diff store and first-seen store (hash at last upgrade, seeding at setup) (FR-032, 033) | 3 | T06 |
 
 ## Phase 3: storage and plumbing
 
 | ID | Task | Pts | Depends |
 |----|------|-----|---------|
-| T10 | Holds store (atomic JSON files), crash-safety test (FR-071) | 3 | T09 |
-| T11 | Brew adapter: subprocess runner (no shell, env, timeout, stdin devnull, name validation), parse with stderr-noise fixtures, snapshot, dry-run, pin/unpin (formula and cask), upgrade, deferred per-package cleanup (FR-004, 011, 051, 052, 057) | 8 | T01, S1, S5 |
-| T12 | Cask rules inputs: auto_updates REPORT, pkg HOLD, running-app DEFER (FR-056) | 3 | T07, S2 |
-| T13 | Audit JSONL writer + schema test + redaction (FR-070); vendored/adapted sanitizer | 3 | T01 |
-| T14 | Run stamp and flock lock implementations (FR-002, 003) | 2 | T03 |
-| T15 | Config loader (tomllib) with defaults and validation | 2 | T01 |
+| T11 | Holds store: decided vs transient, `skipped_for_version`, re-triage on version change, 0700/0600 atomic writes (FR-061, 065) | 3 | T08 |
+| T12 | Reconcile (detect user pins), hold aging counts, stale-hold escalation, weekly digest data (FR-062, 064) | 3 | T11 |
+| T13 | Audit JSONL writer (brew version, models and digests, redacted stderr tails), vendored sanitizer (FR-070) | 3 | T01 |
+| T14 | Config loader: tomllib, refuse group/world-writable, `trusted_taps`, digests, env allowlist and secrets-free child env test (FR-003) | 3 | T01 |
+| T15 | Brew adapter: runner (no shell, `--`, timeouts, stdin devnull), parse with stderr-noise fixtures, plain `outdated` snapshot, explicit component upgrade, dry-run cross-check, per-package deferred cleanup with live-process exclusion (FR-010, 011, 040, 041, 044) | 8 | T07, T09, T14 |
 
-## Phase 4: triage chain
-
-| ID | Task | Pts | Depends |
-|----|------|-----|---------|
-| T16 | Prompt builder: system/user separation, random delimiters, collision stripping, caps, redaction, injection fixtures (FR-045) | 5 | T13 |
-| T17 | Output schemas (pydantic) + closed enums + claim-check (FR-043) | 3 | T07 |
-| T18 | Chain logic with scripted `ModelClient` fakes: all four paths, thresholds, caps, disagreement, retry-once, degraded mode (FR-040..042, 046, 061, 062) | 8 | T16, T17 |
-| T19 | Claude `ModelClient` adapter (structured output, refusal and error mapping, key from env) with SDK stubbed; one opt-in live test (FR-044) | 5 | T18, S6 |
-| T20 | Ollama `ModelClient` adapter on stdlib urllib: preflight, `format` schema, `think:false`, keep_alive, timeouts; opt-in live test | 5 | T18 |
-
-## Phase 5: surfaces and install
+## Phase 4: model chain (caveat diffing T10 is already done)
 
 | ID | Task | Pts | Depends |
 |----|------|-----|---------|
-| T21 | launchd plist generator + install/uninstall (`launchctl bootstrap/bootout`), plist snapshot test, env and PATH assertions (FR-001, 004) | 5 | T04, S4 |
-| T22 | Notifiers: say, osascript, command; fan-out swallow; sanitized phrases (FR-065, 072) | 3 | T01 |
-| T23 | Review CLI interactive flow incl. closure display and service warning (FR-080, 081) | 5 | T09, T11 |
-| T24 | (Stretch) OpenAI-compatible `ModelClient` for omlx / LM Studio | 3 | T18, S3 |
+| T16 | Golden set (~25-30 real, dangerous and injection cases) plus `morning-brew eval` runner reusing the audit JSONL; ship-gate check and refusal of `chain.mode=live` without a recorded pass (FR-057) | 5 | T10, T13 |
+| T17 | Prompt builder (random delimiters, caps, redaction), `suspicious_text` flag, boolean-first schemas (pydantic), coverage check (FR-051, 052, 056) | 5 | T16 |
+| T18 | Chain logic with scripted fakes: suspicious flag, local add-risk-only, Claude blind, shadow vs live, Ollama-down still reaches Claude, unsure paths -> transient (FR-050..053) | 5 | T17 |
+| T19 | Ollama adapter: stdlib urllib, `format` schema, `think:false`, `num_predict`, digest pin, loopback-only and off-loopback warning (FR-055) | 3 | T18 |
+| T20 | Claude adapter + lazy `fnox get` (10 s, stdin devnull, key never in env), refusal and typed-error mapping to transient (FR-054) | 5 | T18, S4, S6 |
+
+## Phase 5: surfaces
+
+| ID | Task | Pts | Depends |
+|----|------|-----|---------|
+| T21 | launchd plist generator and install/uninstall (`StartInterval` 3600, direct venv binary via `uv sync --frozen`, PATH, logs, no RunAtLoad, no fnox wrapper); setup seeds `trusted_taps` and caveat hashes with confirmation (FR-001, 081) | 3 | T04, T10, S4 |
+| T22 | Notifiers: silent notification via AppleScript argv handler, status file, urgent `say`/command, quiet hours, swallow failures (FR-071) | 3 | T01 |
+| T23 | Review CLI: list decided holds, approve component with live-process confirmation, skip per version, untrusted-derived labeling (FR-080) | 3 | T11, T15 |
 
 ## Phase 6: verification
 
 | ID | Task | Pts | Depends |
 |----|------|-----|---------|
-| T25 | End-to-end `run --dry-run` against the real machine (read-only calls only), compare predicted verdicts with the DESIGN section 5 hand-run | 3 | T11, T20 |
-| T26 | Opt-in integration marker suite (real read-only brew, Ollama), docs: README with install and recovery steps (unpin, remove ledger, rollback kegs) | 3 | T25 |
+| T24 | Shadow-mode reporting and real read-only `run --dry-run` against the machine, compared with the DESIGN section 5 hand-run | 3 | T15, T19, T20 |
+| T25 | README (install, rollback procedure with no automated rollback, recovery) and opt-in integration markers | 2 | T24 |
 
 ## Checkpoints
 
-- After Phase 2: rules plus ledger reproduce the hand-derived 13/4/3/1 split on the fixture snapshot.
-- After Phase 4: adversarial-caveat fixtures and the "false leaf claim" fixture escalate rather than approve.
-- After Phase 5: install on a throwaway label, verify a run via `launchctl kickstart`, then uninstall.
+- After Phase 2: rules and components reproduce the DESIGN section 5 table on fixtures, including vector as live-process HOLD and the aws trio as one component.
+- After T16: the golden set exists before any chain code (the gate is defined before the thing it measures).
+- After Phase 4: adversarial-caveat and false-claim fixtures never approve; ship gate recorded before `live`.
+- After Phase 5: install on a throwaway label, kickstart one run, uninstall.
 
-Totals: spikes 16 points, implementation 111 points (no task at or above 21).
+## Totals
+
+Implementation tasks T00-T25: 3+5+5+5+3 (=21) +3+5+3+5+5+3 (=24) +3+3+3+3+8 (=20) +5+5+5+3+5 (=23) +3+3+3 (=9) +3+2 (=5) = **102 points**. Open spikes S4 and S6: **6 points**. Total including spikes: **108 points**. No task is 21 or more.
