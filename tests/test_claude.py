@@ -500,3 +500,11 @@ def test_setup_and_validation_failures_carry_no_context():
     with pytest.raises(ModelTransient) as info2:
         c2.assess(PROMPT)
     assert info2.value.__context__ is None
+
+
+def test_secret_unavailable_sets_last_error_kind_secret():
+    # C12: the run surfaces a missing key as an anomaly, like an auth failure.
+    c, _, _ = make(Provider(exc=SecretUnavailable("fnox get failed")))
+    with pytest.raises(ModelTransient):
+        c.assess(PROMPT)
+    assert c.last_error_kind == "secret"

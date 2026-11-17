@@ -108,6 +108,13 @@ class JsonlAudit:
 
     def events_for(self, package: str) -> list[AuditEvent]:
         """Return events for ``package`` in append (file) order."""
+        return self._read(package)
+
+    def all_events(self) -> list[AuditEvent]:
+        """Every readable event in append (file) order."""
+        return self._read(None)
+
+    def _read(self, package: str | None) -> list[AuditEvent]:
         try:
             data = self._path.read_bytes()
         except FileNotFoundError:
@@ -120,7 +127,7 @@ class JsonlAudit:
                 raw = json.loads(chunk.decode("utf-8"))
                 if not isinstance(raw, dict):
                     raise TypeError("not an object")
-                if raw.get("package") != package:
+                if package is not None and raw.get("package") != package:
                     continue
                 out.append(_from_dict(raw))
             except (ValueError, KeyError, TypeError, IndexError):

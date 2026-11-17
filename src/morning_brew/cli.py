@@ -5,18 +5,49 @@ import json
 import re
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from morning_brew.config import Config
-from morning_brew.domain import EXIT_ERROR, EXIT_OK, AuditEvent
+from morning_brew.domain import (
+    EXIT_ERROR,
+    EXIT_OK,
+    AuditEvent,
+    BrewBusyError,
+    BrewParseError,
+    BrewUpdateError,
+    ConfigError,
+    GateNotPassed,
+    InstallError,
+    InvalidPackageName,
+    StateUnwritable,
+    UnlabeledCases,
+)
 from morning_brew.orchestrator import run_once
 from morning_brew.ports import Ports
+from morning_brew.shadow import ShadowReport
 from morning_brew.summary import render_summary
 from morning_brew.textsafe import strip_control
 
 EXIT_USAGE = 2
 _DECISION_STAGES = frozenset({"decide", "dry_run"})
 _NAME = re.compile(r"[A-Za-z0-9@._+/-]+")
+_CLAUDE_ALARMS = frozenset({"auth", "secret"})
+# [C16] Expected failures end in one clean line and exit 1, never a traceback.
+_CLEAN_ERRORS = (
+    BrewParseError,
+    BrewBusyError,
+    BrewUpdateError,
+    InvalidPackageName,
+    ConfigError,
+    StateUnwritable,
+    InstallError,
+    OSError,
+)
+UNLABELED_MESSAGE = "label the 10 real caveats in golden-real-caveats.md first"
+GATE_HINT = (
+    'set chain_mode = "shadow", run `morning-brew eval` until it passes, '
+    "then switch back to live"
+)
 
 
 @dataclass
@@ -28,6 +59,9 @@ class CliDeps:
     uninstall: Callable[[], int]
     eval: Callable[[], int]
     print_plist: Callable[[], bytes] | None = None
+    # [C12] The run's Claude client error kind ("auth" / "secret" / None).
+    triage_error: Callable[[], str | None] | None = None
+    shadow: Callable[[], ShadowReport] | None = None
 
 
 def _emit(text: str) -> None:
@@ -61,17 +95,37 @@ def _parser() -> argparse.ArgumentParser:
 
 def _cmd_run(deps: CliDeps, dry_run: bool) -> int:
     result = run_once(deps.ports, deps.config, dry_run=dry_run)
-    if result.summary is not None:
-        _emit(render_summary(result.summary))
+    summary = result.summary
+    kind = deps.triage_error() if deps.triage_error is not None else None
+    if summary is not None and kind in _CLAUDE_ALARMS:
+        # [C12] A stale or missing key would otherwise hold GREY members forever.
+        anomaly = f"claude {kind} failure: check the API key (fnox)"
+        summary = replace(summary, anomalies=(*summary.anomalies, anomaly))
+        if not dry_run:  # a dry run records and notifies nothing
+            deps.ports.status.write(summary)
+            try:
+                deps.ports.notifier.notify(summary, urgent=True)
+            except Exception as exc:  # a broken notifier must never fail the run
+                _err(f"notifier failed: {type(exc).__name__}")
+    if summary is not None:
+        _emit(render_summary(summary))
     return result.exit_code
+
+
+def _shadow_line(deps: CliDeps) -> None:
+    if deps.config.chain_mode != "shadow" or deps.shadow is None:
+        return
+    _emit(f"shadow runs: {deps.shadow().runs}/{deps.config.shadow_runs}")
 
 
 def _cmd_status(deps: CliDeps) -> int:
     summary = deps.ports.status.read()
     if summary is None:
         _emit("no runs recorded")
+        _shadow_line(deps)
         return EXIT_OK
     _emit(render_summary(summary))
+    _shadow_line(deps)
     return EXIT_ERROR if summary.dead_man else EXIT_OK
 
 
@@ -147,7 +201,23 @@ def main(
         from morning_brew.wiring import build_deps  # lazy: built in T24
 
         deps_factory = build_deps
-    deps = deps_factory()
+    try:
+        return _dispatch(args, deps_factory())
+    except GateNotPassed as exc:
+        _err(f"morning-brew: {_one_line(exc)}; {GATE_HINT}")
+    except UnlabeledCases:
+        _err(f"morning-brew eval: {UNLABELED_MESSAGE}")
+    except _CLEAN_ERRORS as exc:
+        _err(f"morning-brew {args.command}: {type(exc).__name__}: {_one_line(exc)}")
+    return EXIT_ERROR
+
+
+def _one_line(exc: BaseException) -> str:
+    lines = str(exc).strip().splitlines()
+    return lines[0] if lines else type(exc).__name__
+
+
+def _dispatch(args: argparse.Namespace, deps: CliDeps) -> int:
     match args.command:
         case "run":
             return _cmd_run(deps, args.dry_run)

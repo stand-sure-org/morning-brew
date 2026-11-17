@@ -40,6 +40,7 @@ class Config:
     quiet_hours: tuple[int, int] = (22, 7)
     state_dir: Path = field(default_factory=_default_state_dir)
     fnox_config: Path | None = None
+    notify_command: tuple[str, ...] | None = None
 
 
 _INT_FIELDS = frozenset(
@@ -96,6 +97,16 @@ def _convert(key: str, value: Any) -> Any:
         ):
             raise ConfigError("config key 'quiet_hours' must be two integers 0-23")
         return (value[0], value[1])
+    if key == "notify_command":
+        if (
+            not isinstance(value, list)
+            or not value
+            or not all(isinstance(a, str) and a for a in value)
+        ):
+            raise ConfigError(
+                "config key 'notify_command' must be a non-empty list of strings"
+            )
+        return tuple(value)
     if key == "fnox_config":
         if not isinstance(value, str):
             raise ConfigError("config key 'fnox_config' must be a string path")

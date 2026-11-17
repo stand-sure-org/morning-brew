@@ -35,6 +35,7 @@ CLIENT_TIMEOUT = 60
 CLIENT_MAX_RETRIES = 2
 BETAS = ("server-side-fallback-2026-07-01",)
 AUTH = "auth"
+SECRET = "secret"
 _CATEGORY = re.compile(r"[a-z0-9_-]{1,40}")
 
 
@@ -57,8 +58,9 @@ class ClaudeClient:
     """``ModelClient`` backed by the Anthropic API.
 
     ``last_error_kind`` is ``"auth"`` once any call in this client's lifetime
-    (one run) failed authentication or permission; the orchestrator surfaces
-    it as an anomaly so a stale key is noticed rather than holding forever.
+    (one run) failed authentication or permission, or ``"secret"`` when the
+    key could not be fetched; the CLI surfaces either as an urgent anomaly so
+    a stale or missing key is noticed rather than holding forever.
     """
 
     def __init__(
@@ -91,7 +93,8 @@ class ClaudeClient:
             self._client = self._factory(self._key_provider())
         except SecretUnavailable:
             log.warning("claude key unavailable")
-            self._setup_failure = "secret"
+            self._setup_failure = SECRET
+            self.last_error_kind = SECRET
         except Exception as exc:  # noqa: BLE001 - mapped below, type name only
             log.warning("claude client setup failed: %s", type(exc).__name__)
             self._setup_failure = "claude error"

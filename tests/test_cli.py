@@ -321,3 +321,144 @@ def test_dispatch(cmd, rc):
 
 def test_no_subcommand_exits_2():
     assert main([], deps_factory=make_deps()[0]) == 2
+
+
+# --- T24: wiring-facing CLI behaviour -------------------------------------------
+
+
+def _raiser(exc: Exception):
+    def fn() -> int:
+        raise exc
+
+    return fn
+
+
+def test_run_surfaces_claude_auth_failure_as_urgent_anomaly(monkeypatch, capsys):
+    from fakes import FakeNotifier
+
+    s = make_summary()
+    monkeypatch.setattr(
+        cli, "run_once", lambda *a, **k: RunResult(exit_code=0, summary=s)
+    )
+    factory, deps, _ = make_deps()
+    deps.ports.notifier = FakeNotifier(calls=[])
+    deps.triage_error = lambda: "auth"
+    assert main(["run"], deps_factory=factory) == 0
+    ((sent, urgent),) = deps.ports.notifier.sent
+    assert urgent is True
+    assert any("auth" in a for a in sent.anomalies)
+    assert deps.ports.status.last == sent
+    assert "auth" in capsys.readouterr().out
+
+
+def test_run_surfaces_claude_secret_failure(monkeypatch):
+    from fakes import FakeNotifier
+
+    s = make_summary()
+    monkeypatch.setattr(
+        cli, "run_once", lambda *a, **k: RunResult(exit_code=0, summary=s)
+    )
+    factory, deps, _ = make_deps()
+    deps.ports.notifier = FakeNotifier(calls=[])
+    deps.triage_error = lambda: "secret"
+    main(["run"], deps_factory=factory)
+    ((sent, urgent),) = deps.ports.notifier.sent
+    assert urgent and any("secret" in a for a in sent.anomalies)
+
+
+def test_run_without_claude_error_does_not_renotify(monkeypatch):
+    from fakes import FakeNotifier
+
+    s = make_summary()
+    monkeypatch.setattr(
+        cli, "run_once", lambda *a, **k: RunResult(exit_code=0, summary=s)
+    )
+    factory, deps, _ = make_deps()
+    deps.ports.notifier = FakeNotifier(calls=[])
+    deps.triage_error = lambda: None
+    main(["run"], deps_factory=factory)
+    assert deps.ports.notifier.sent == []
+
+
+def test_dry_run_claude_error_is_printed_not_notified(monkeypatch, capsys):
+    from fakes import FakeNotifier
+
+    s = make_summary()
+    monkeypatch.setattr(
+        cli, "run_once", lambda *a, **k: RunResult(exit_code=0, summary=s)
+    )
+    factory, deps, _ = make_deps()
+    deps.ports.notifier = FakeNotifier(calls=[])
+    deps.triage_error = lambda: "auth"
+    main(["run", "--dry-run"], deps_factory=factory)
+    assert deps.ports.notifier.sent == []
+    assert deps.ports.status.last is None
+    assert "auth" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("cmd", ["review", "eval", "run"])
+def test_brew_error_is_one_line_exit_1(cmd, monkeypatch, capsys):
+    from morning_brew.domain import BrewParseError
+
+    exc = BrewParseError("brew outdated --json=v2 exited 1: boom")
+    monkeypatch.setattr(cli, "run_once", lambda *a, **k: (_ for _ in ()).throw(exc))
+    factory, deps, _ = make_deps()
+    deps.review = _raiser(exc)
+    deps.eval = _raiser(exc)
+    assert main([cmd], deps_factory=factory) == 1
+    err = capsys.readouterr().err
+    assert "boom" in err and "Traceback" not in err
+    assert len(err.strip().splitlines()) == 1
+
+
+def test_build_failure_gate_not_passed_is_clean_with_hint(capsys):
+    from morning_brew.domain import GateNotPassed
+
+    def factory():
+        raise GateNotPassed("live chain mode requires a recorded passing eval")
+
+    assert main(["run"], deps_factory=factory) == 1
+    err = capsys.readouterr().err
+    assert "shadow" in err and "morning-brew eval" in err
+    assert len(err.strip().splitlines()) == 1
+
+
+def test_eval_unlabeled_cases_message(capsys):
+    from morning_brew.domain import UnlabeledCases
+
+    factory, deps, _ = make_deps()
+    deps.eval = _raiser(UnlabeledCases("r1, r2"))
+    assert main(["eval"], deps_factory=factory) == 1
+    assert (
+        "label the 10 real caveats in golden-real-caveats.md first"
+        in capsys.readouterr().err
+    )
+
+
+def test_status_shows_shadow_runs_in_shadow_mode(capsys):
+    from morning_brew.shadow import ShadowReport
+
+    factory, deps, _ = make_deps(summary=make_summary())
+    deps.shadow = lambda: ShadowReport(3, 2, 1, 0)
+    assert main(["status"], deps_factory=factory) == 0
+    assert "shadow runs: 3/10" in capsys.readouterr().out
+
+
+def test_status_shadow_line_with_no_runs(capsys):
+    from morning_brew.shadow import ShadowReport
+
+    factory, deps, _ = make_deps()
+    deps.shadow = lambda: ShadowReport(0, 0, 0, 0)
+    main(["status"], deps_factory=factory)
+    out = capsys.readouterr().out
+    assert "no runs recorded" in out and "shadow runs: 0/10" in out
+
+
+def test_status_no_shadow_line_in_live_mode(capsys):
+    from morning_brew.shadow import ShadowReport
+
+    factory, deps, _ = make_deps(summary=make_summary())
+    deps.config = Config(chain_mode="live")
+    deps.shadow = lambda: ShadowReport(3, 2, 1, 0)
+    main(["status"], deps_factory=factory)
+    assert "shadow runs" not in capsys.readouterr().out

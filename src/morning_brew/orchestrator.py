@@ -498,12 +498,27 @@ def _audit_events(
                 verdict=str(verdict),
                 action_result=action,
                 models=((outcome.stage, None),) if outcome else (),
+                booleans=_triage_booleans(outcome) if outcome else None,
                 reasoning=outcome.reasoning if outcome else None,
                 component=_component_id(plan),
                 hold_kind=_hold_kind(verdict, d),
             )
         )
     return events
+
+
+def _triage_booleans(o: TriageOutcome) -> dict[str, bool]:
+    """What the chain would have done, for the shadow report (T24).
+
+    A shadow would-upgrade and a Claude outage are both transient holds;
+    only these flags tell them apart in the audit log.
+    """
+    return {
+        "would_upgrade": "upgrade" in (o.kind, o.would_be),
+        "would_hold": o.kind == "hold",
+        "disagreement": o.disagreement,
+        "local_flagged": o.local_flagged,
+    }
 
 
 def _summary(
