@@ -37,6 +37,8 @@ BETAS = ("server-side-fallback-2026-07-01",)
 AUTH = "auth"
 SECRET = "secret"
 _CATEGORY = re.compile(r"[a-z0-9_-]{1,40}")
+# A finished answer; None is tolerated for an SDK parse result that omits it.
+_ACCEPTED_STOPS = frozenset({"end_turn", None})
 
 
 def default_client_factory(key: str) -> Any:
@@ -141,6 +143,9 @@ class ClaudeClient:
             raise ModelTransient(f"refusal:{category}")
         if stop == "max_tokens":
             raise ModelInvalidOutput("claude output truncated (max_tokens)")
+        if stop not in _ACCEPTED_STOPS:  # [M3] allowlist, value never echoed
+            log.warning("claude stopped unexpectedly")
+            raise ModelInvalidOutput("claude stopped for an unexpected reason")
         obj = getattr(response, "parsed_output", None)
         if obj is None:
             raise ModelInvalidOutput("claude returned no parsed output")

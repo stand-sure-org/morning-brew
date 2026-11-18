@@ -57,7 +57,7 @@ def _strip_delimiter(text: str) -> str:
         text = out
 
 
-def _untrusted(text: str | None) -> str:
+def _untrusted(text: str | None, cap: int = UNTRUSTED_CAP) -> str:
     if not text:
         return ""
     # Strip control and invisible characters and the delimiter until stable
@@ -70,7 +70,7 @@ def _untrusted(text: str | None) -> str:
         if nxt == out:
             break
         out = nxt
-    return _strip_delimiter(redact(out))[:UNTRUSTED_CAP]
+    return _strip_delimiter(redact(out))[:cap]
 
 
 def _fact(value: str | None) -> str:
@@ -79,7 +79,9 @@ def _fact(value: str | None) -> str:
     return _FACT_UNSAFE.sub("?", _strip_delimiter(value))[:_FACT_CAP]
 
 
-def build_prompt(request: TriageRequest, *, token: str | None = None) -> Prompt:
+def build_prompt(
+    request: TriageRequest, *, token: str | None = None, cap: int = UNTRUSTED_CAP
+) -> Prompt:
     if token is None:
         token = secrets.token_hex(8)
     if not _TOKEN.fullmatch(token):
@@ -101,6 +103,6 @@ def build_prompt(request: TriageRequest, *, token: str | None = None) -> Prompt:
     )
     user = (
         f"{facts}\n\nCAVEATS (untrusted)\n"
-        f"<untrusted-{token}>{_untrusted(request.caveats)}</untrusted-{token}>"
+        f"<untrusted-{token}>{_untrusted(request.caveats, cap)}</untrusted-{token}>"
     )
     return Prompt(system=SYSTEM_PROMPT, user=user, delimiter=token)

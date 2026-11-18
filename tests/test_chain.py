@@ -98,9 +98,9 @@ def test_suspicious_checked_before_prompt_built(monkeypatch):
     order: list[str] = []
     real_suspicious, real_build = chain_mod.suspicious_text, chain_mod.build_prompt
 
-    def spy_suspicious(text):
+    def spy_suspicious(text, *args):
         order.append("suspicious")
-        return real_suspicious(text)
+        return real_suspicious(text, *args)
 
     def spy_build(request, **kw):
         order.append("build_prompt")
@@ -230,3 +230,24 @@ def test_injection_cannot_flip_verdict_with_adversarial_claude():
 def test_mode_is_validated():
     with pytest.raises(ValueError):
         TriageChain(None, Scripted(clear), "yolo")
+
+
+# --- I5 / R58: the untrusted-text cap is configurable -------------------------
+
+
+def test_untrusted_cap_reaches_suspicious_flag():
+    claude = Scripted(clear)
+    chain = TriageChain(None, claude, "live", untrusted_cap=50)
+    out = chain.triage(req("Installed to /opt/homebrew/opt/pkg. " + "x" * 40))
+    assert out.kind == "hold" and out.stage == "suspicious"
+    assert claude.calls == 0
+
+
+def test_untrusted_cap_reaches_prompt_truncation():
+    from morning_brew.triage.prompt import build_prompt
+
+    caveat = "word " * 100
+    short = build_prompt(req(caveat), cap=60)
+    full = build_prompt(req(caveat))
+    assert "word " * 13 not in short.user
+    assert "word " * 13 in full.user

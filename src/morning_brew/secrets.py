@@ -19,16 +19,24 @@ FNOX_TIMEOUT = 10
 _NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 
 
-def fnox_get(name: str, runner: CommandRunner, config_path: Path) -> str:
+def fnox_get(
+    name: str, runner: CommandRunner, config_path: Path, timeout: float = FNOX_TIMEOUT
+) -> str:
     """Return the secret ``name`` or raise ``SecretUnavailable``."""
     if not _NAME.fullmatch(name):
         raise SecretUnavailable("invalid secret name")
     argv = ["fnox", "get", "--config", str(config_path), name]
+    # [M3] Record the failure, raise outside ``except``: the runner's exception
+    # never becomes ``__context__`` (it may quote fnox output).
+    failure: str | None = None
+    result = None
     try:
-        result = runner(argv, FNOX_TIMEOUT)
+        result = runner(argv, timeout)
     except Exception as exc:  # noqa: BLE001 - any runner failure is "unavailable"
-        log.warning("fnox get %s failed: %s", name, type(exc).__name__)
-        raise SecretUnavailable(f"fnox get failed: {type(exc).__name__}") from None
+        failure = type(exc).__name__
+    if failure is not None or result is None:
+        log.warning("fnox get %s failed: %s", name, failure)
+        raise SecretUnavailable(f"fnox get failed: {failure}")
     if result.returncode != 0:
         # stderr is not logged: it is fnox's text and could quote the value.
         log.warning("fnox get %s exited %s", name, result.returncode)

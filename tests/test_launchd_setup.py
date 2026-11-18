@@ -171,3 +171,81 @@ def test_read_trusted_taps_tolerates_missing_and_corrupt(tmp_path):
     assert read_trusted_taps(tmp_path) == frozenset()
     (tmp_path / "trusted_taps.json").write_text('{"a": 1}')
     assert read_trusted_taps(tmp_path) == frozenset()
+
+
+def test_plist_start_interval_is_configurable(tmp_path):
+    p = plistlib.loads(
+        render_plist(Path("/p/.venv/bin/morning-brew"), Path("/Users/me"), 900)
+    )
+    assert p["StartInterval"] == 900
+    venv = _venv(tmp_path)
+    install(Runner(), venv, tmp_path, 501, start_interval=600)
+    written = tmp_path / "Library/LaunchAgents/com.morningbrew.run.plist"
+    assert plistlib.loads(written.read_bytes())["StartInterval"] == 600
+
+
+# --- I4: the `setup` command ----------------------------------------------------
+
+
+def _setup(tmp_path, answers, digest=None, digest_exc=None):
+    from morning_brew.setup import setup_command
+
+    out: list[str] = []
+    asked: list[str] = []
+    it = iter(answers)
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        try:
+            return next(it)
+        except StopIteration:
+            raise EOFError from None
+
+    def probe():
+        if digest_exc is not None:
+            raise digest_exc
+        return digest
+
+    seen = FakeSeen()
+    rc = setup_command(
+        snapshot=_snap,
+        installed_caveats=lambda: {"awscli": "caveat"},
+        seen=seen,
+        state_dir=tmp_path / "state",
+        ask=ask,
+        say=out.append,
+        ollama_digest=probe,
+        model="qwen3:4b",
+    )
+    return rc, out, asked, seen
+
+
+def test_setup_command_confirmed_with_y(tmp_path):
+    rc, out, asked, seen = _setup(tmp_path, ["y"])
+    assert rc == 0
+    assert read_trusted_taps(tmp_path / "state") == {"jandedobbeleer/oh-my-posh"}
+    assert seen.caveat_hash("awscli") is not None
+    assert "[y/N]" in asked[0]
+    assert any("jandedobbeleer/oh-my-posh" in line for line in out)
+
+
+@pytest.mark.parametrize("answers", [[""], ["n"], ["yes please"], []])
+def test_setup_command_anything_but_y_declines(tmp_path, answers):
+    rc, out, _, seen = _setup(tmp_path, answers)
+    assert rc == 0
+    assert not (tmp_path / "state" / "trusted_taps.json").exists()
+    assert seen.caveat_hash("awscli") is None
+    assert any("nothing written" in line for line in out)
+
+
+def test_setup_command_prints_ollama_digest_hint_when_up(tmp_path):
+    _, out, _, _ = _setup(tmp_path, ["n"], digest="b" * 64)
+    text = "\n".join(out)
+    assert "local_digest" in text and "sha256:" + "b" * 64 in text
+
+
+def test_setup_command_no_hint_when_ollama_down(tmp_path):
+    from morning_brew.domain import ModelUnavailable
+
+    _, out, _, _ = _setup(tmp_path, ["n"], digest_exc=ModelUnavailable("down"))
+    assert "local_digest" not in "\n".join(out)

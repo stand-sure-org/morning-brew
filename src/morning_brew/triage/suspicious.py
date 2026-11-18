@@ -65,10 +65,10 @@ _PATTERNS = re.compile(
 )
 
 
-def suspicious_text(text: str | None) -> bool:
+def suspicious_text(text: str | None, cap: int = UNTRUSTED_CAP) -> bool:
     if not text:
         return False
-    if len(text) > UNTRUSTED_CAP:
+    if len(text) > cap:
         return True
     if _CONTROL.search(text) or any(is_invisible(ch) for ch in text):
         return True

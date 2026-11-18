@@ -35,6 +35,8 @@ log = logging.getLogger(__name__)
 
 PORT = 11434
 CALL_TIMEOUT = 120
+NUM_PREDICT = 400
+_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
 MAX_BODY = 1_048_576
 LSOF_TIMEOUT = 10
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -84,8 +86,9 @@ def _validate_base_url(base_url: str) -> str:
 
 
 def _norm_digest(value: object) -> str:
+    """[M2] strip, then lower, then drop the prefix: " SHA256:ab" -> "ab"."""
     text = value if isinstance(value, str) else ""
-    return text.removeprefix("sha256:").strip().lower()
+    return text.strip().lower().removeprefix("sha256:")
 
 
 class OllamaClient:
@@ -97,12 +100,16 @@ class OllamaClient:
         base_url: str = "http://127.0.0.1:11434",
         opener: Callable[..., Any] | None = None,
         runner: CommandRunner | None = None,
+        num_predict: int = NUM_PREDICT,
+        timeout: float = CALL_TIMEOUT,
     ):
         self._base = _validate_base_url(base_url)
         self._model = model
         self._expected = _norm_digest(expected_digest) or None
         self._opener = opener if opener is not None else _default_opener()
         self._runner = runner
+        self._num_predict = num_predict  # [R58] config local_num_predict
+        self._timeout = timeout  # [R58] config ollama_timeout_s
         self._digest_result: bool | None = None
 
     # transport -----------------------------------------------------------
@@ -121,7 +128,7 @@ class OllamaClient:
             headers={"Content-Type": "application/json"},
         )
         try:
-            with self._opener(request, timeout=CALL_TIMEOUT) as resp:
+            with self._opener(request, timeout=self._timeout) as resp:
                 raw = resp.read(MAX_BODY + 1)
         except urllib.error.HTTPError as exc:
             log.warning("ollama %s: HTTP %s", path, exc.code)
@@ -149,18 +156,21 @@ class OllamaClient:
 
     # digest pin ----------------------------------------------------------
 
+    def _served_digest(self) -> str | None:
+        """The normalised digest the server reports for the model tag."""
+        body = self._call("/api/tags", None)
+        models = body.get("models")
+        if isinstance(models, list):
+            for entry in models:
+                if isinstance(entry, dict) and entry.get("name") == self._model:
+                    return _norm_digest(entry.get("digest"))
+        return None
+
     def _digest_matches(self) -> bool:
         """True when the model tag resolves to the pinned digest (cached)."""
         if self._digest_result is not None:
             return self._digest_result
-        body = self._call("/api/tags", None)
-        models = body.get("models")
-        found: str | None = None
-        if isinstance(models, list):
-            for entry in models:
-                if isinstance(entry, dict) and entry.get("name") == self._model:
-                    found = _norm_digest(entry.get("digest"))
-                    break
+        found = self._served_digest()
         ok = bool(found) and found == self._expected
         if self._expected is not None and not ok:
             log.warning("ollama digest pin mismatch or model missing (%s)", self._model)
@@ -177,6 +187,16 @@ class OllamaClient:
             return OllamaStatus(up=False, digest_ok=False, off_loopback=off)
         return OllamaStatus(up=True, digest_ok=ok, off_loopback=off)
 
+    def model_digest(self) -> str | None:
+        """[I4] The digest to pin, for ``setup``: 64 hex chars or None.
+
+        Read-only (``GET /api/tags``). The value comes from a local server,
+        so anything that is not a plain hex digest is dropped, never shown.
+        Raises ModelUnavailable when Ollama is down.
+        """
+        found = self._served_digest()
+        return found if found and _HEX_DIGEST.fullmatch(found) else None
+
     def assess(self, prompt: Prompt) -> RiskAssessment:
         if self._expected is None:
             raise ModelUnavailable("digest not pinned")
@@ -191,7 +211,7 @@ class OllamaClient:
             "stream": False,
             "think": False,
             "format": RiskAssessment.model_json_schema(),
-            "options": {"temperature": 0, "num_predict": 400},
+            "options": {"temperature": 0, "num_predict": self._num_predict},
             "keep_alive": "5m",
         }
         for attempt in (1, 2):

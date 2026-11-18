@@ -23,7 +23,7 @@ from morning_brew.ports import TriagePort
 from morning_brew.triage.coverage import accepts_upgrade, coverage_ok
 from morning_brew.triage.prompt import Prompt, build_prompt
 from morning_brew.triage.schemas import RiskAssessment
-from morning_brew.triage.suspicious import suspicious_text
+from morning_brew.triage.suspicious import UNTRUSTED_CAP, suspicious_text
 
 log = logging.getLogger(__name__)
 
@@ -69,17 +69,30 @@ def _flagged(a: RiskAssessment) -> bool:
 
 
 class TriageChain(TriagePort):
-    def __init__(self, local: ModelClient | None, claude: ModelClient, mode: Mode):
+    def __init__(
+        self,
+        local: ModelClient | None,
+        claude: ModelClient,
+        mode: Mode,
+        *,
+        untrusted_cap: int = UNTRUSTED_CAP,
+    ):
         if mode not in _MODES:
             raise ValueError(f"unknown chain mode: {mode!r}")
         self._local = local
         self._claude = claude
         self._mode = mode
+        # [R58] one cap for both the length flag and the prompt truncation
+        self._cap = untrusted_cap
+
+    @property
+    def mode(self) -> Mode:
+        return self._mode
 
     def triage(self, request: TriageRequest) -> TriageOutcome:
         name = request.full_name
         # C10: flag before any prompt is built or any model is called.
-        if suspicious_text(request.caveats):
+        if suspicious_text(request.caveats, self._cap):
             log.info("triage %s: decided by stage=suspicious (hold)", name)
             return TriageOutcome("hold", "suspicious caveat text", STAGE_SUSPICIOUS)
 
@@ -87,7 +100,7 @@ class TriageChain(TriagePort):
 
         # Blind: Claude's prompt comes from the request alone, fresh token.
         try:
-            a = _validated(self._claude.assess(build_prompt(request)))
+            a = _validated(self._claude.assess(build_prompt(request, cap=self._cap)))
         except ModelInvalidOutput:
             log.warning("triage %s: claude returned invalid output (transient)", name)
             return self._transient("invalid output", local_flagged)
@@ -157,7 +170,7 @@ class TriageChain(TriagePort):
         if self._local is None:
             return False
         try:
-            a = _validated(self._local.assess(build_prompt(request)))
+            a = _validated(self._local.assess(build_prompt(request, cap=self._cap)))
         except Exception as exc:
             log.info(
                 "triage %s: local stage skipped (%s)",

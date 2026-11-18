@@ -508,3 +508,34 @@ def test_secret_unavailable_sets_last_error_kind_secret():
     with pytest.raises(ModelTransient):
         c.assess(PROMPT)
     assert c.last_error_kind == "secret"
+
+
+# --- M3: no exception context; stop_reason allowlist -------------------------
+
+
+def test_fnox_runner_failure_has_no_exception_context():
+    runner = Runner(exc=OSError("spawn failed: " + KEY))
+    with pytest.raises(SecretUnavailable) as info:
+        fnox_get("ANTHROPIC_API_KEY", runner, CONFIG)
+    assert info.value.__context__ is None and info.value.__cause__ is None
+
+
+def test_fnox_timeout_is_configurable():
+    runner = runner_ok("v\n")
+    fnox_get("K", runner, CONFIG, timeout=3)
+    assert runner.calls[0][1] == 3
+
+
+@pytest.mark.parametrize("stop", ["tool_use", "pause_turn", "stop_sequence", "weird"])
+def test_unexpected_stop_reason_is_invalid_output(stop):
+    c, _, factory = make()
+    factory.client.stop_reason = stop
+    with pytest.raises(ModelInvalidOutput):
+        c.assess(PROMPT)
+
+
+@pytest.mark.parametrize("stop", ["end_turn", None])
+def test_end_turn_and_none_stop_reasons_are_accepted(stop):
+    c, _, factory = make()
+    factory.client.stop_reason = stop
+    assert c.assess(PROMPT).verdict == "upgrade"

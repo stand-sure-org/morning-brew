@@ -286,10 +286,13 @@ def test_oversized_body_is_invalid_output():
         client(opener).assess(PROMPT)
 
 
-@pytest.mark.parametrize("pin", ["", "  ", "sha256:", " sha256: "])
+@pytest.mark.parametrize("pin", ["", "  ", "sha256:", " sha256: ", " SHA256: "])
 def test_empty_pin_fails_closed(pin: str):
+    # [M2] every pin here normalises to empty, so it must fail closed even
+    # though the server does report a digest for the model
     opener = FakeOpener(
-        [chat_body(json.dumps(GOOD))], tags={"models": [{"name": "qwen3:4b"}]}
+        [chat_body(json.dumps(GOOD))],
+        tags={"models": [{"name": "qwen3:4b", "digest": DIGEST}]},
     )
     c = client(opener, digest=pin)
     assert c.check_available().digest_ok is False
@@ -416,3 +419,50 @@ def test_real_ollama_roundtrip():
     c = OllamaClient("qwen3:4b", digest)
     assert c.check_available().up
     assert isinstance(c.assess(PROMPT), RiskAssessment)
+
+
+# --- M2 / R58 / I4: digest normalisation, config knobs, setup probe -----------
+
+
+def test_digest_normalised_strip_then_lower_then_prefix():
+    opener = FakeOpener(
+        [chat_body(json.dumps(GOOD))],
+        tags={"models": [{"name": "qwen3:4b", "digest": "sha256:" + DIGEST}]},
+    )
+    c = client(opener, digest="  SHA256:" + DIGEST.upper() + " ")
+    assert c.assess(PROMPT).verdict == "upgrade"
+
+
+def test_num_predict_and_timeout_are_configurable():
+    opener = FakeOpener([chat_body(json.dumps(GOOD))])
+    c = OllamaClient("qwen3:4b", DIGEST, opener=opener, num_predict=77, timeout=9)
+    c.assess(PROMPT)
+    body = json.loads(opener.requests[-1].data)
+    assert body["options"]["num_predict"] == 77
+    assert set(opener.timeouts) == {9}
+
+
+def test_model_digest_reports_the_pinnable_digest():
+    opener = FakeOpener(
+        [], tags={"models": [{"name": "qwen3:4b", "digest": "sha256:" + DIGEST}]}
+    )
+    assert OllamaClient("qwen3:4b", None, opener=opener).model_digest() == DIGEST
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        {"models": [{"name": "qwen3:4b", "digest": "evil\x1b[31m; rm -rf"}]},
+        {"models": [{"name": "other", "digest": DIGEST}]},
+        {"models": "nope"},
+    ],
+)
+def test_model_digest_is_none_unless_a_hex_digest(tags):
+    opener = FakeOpener([], tags=tags)
+    assert OllamaClient("qwen3:4b", None, opener=opener).model_digest() is None
+
+
+def test_model_digest_when_down_raises_unavailable():
+    opener = FakeOpener([], tags=urllib.error.URLError("refused"))
+    with pytest.raises(ModelUnavailable):
+        OllamaClient("qwen3:4b", None, opener=opener).model_digest()

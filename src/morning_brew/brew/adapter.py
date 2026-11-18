@@ -91,6 +91,16 @@ class BrewCli:
             # ValueError covers json.JSONDecodeError.
             raise BrewParseError(f"unreadable brew output: {exc!r}") from exc
 
+    def installed_caveats(self) -> dict[str, str | None]:
+        """[I4] Caveats of every installed formula, for ``setup``. Read-only."""
+        try:
+            info = json.loads(self._read(["info", "--json=v2", "--installed"]))
+            return {f["full_name"]: f.get("caveats") for f in info["formulae"]}
+        except BrewParseError:
+            raise
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise BrewParseError(f"unreadable brew output: {exc!r}") from exc
+
     def upgrade(self, members: Sequence[str]) -> UpgradeResult:
         names = list(members)
         if not names:

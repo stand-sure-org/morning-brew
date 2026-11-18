@@ -416,3 +416,24 @@ def test_subprocess_runner_feeds_input_to_stdin():
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "HELLO"
+
+
+# --- I4: caveats of every installed formula, for setup ------------------------
+
+
+def test_installed_caveats_reads_info_installed_read_only():
+    import json as _json
+
+    runner = fixture_runner()
+    caveats = make_cli(runner).installed_caveats()
+    info = _json.loads(fixture_text("info.json"))
+    assert set(caveats) == {f["full_name"] for f in info["formulae"]}
+    assert runner.calls == [([BREW, "info", "--json=v2", "--installed"], 120.0)]
+
+
+def test_installed_caveats_unreadable_is_parse_error():
+    from morning_brew.domain import BrewParseError
+
+    runner = RecordingRunner(next=CommandResult(0, "{not json", ""))
+    with pytest.raises(BrewParseError):
+        make_cli(runner).installed_caveats()

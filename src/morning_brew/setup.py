@@ -6,10 +6,17 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from morning_brew.domain import Kind, Snapshot
+from morning_brew.domain import (
+    EXIT_OK,
+    Kind,
+    ModelInvalidOutput,
+    ModelUnavailable,
+    Snapshot,
+)
 from morning_brew.ports import SeenStorePort
 from morning_brew.store.atomic import write_json_atomic
 from morning_brew.store.seen import seed_caveat_hashes
+from morning_brew.textsafe import strip_control
 
 log = logging.getLogger(__name__)
 
@@ -70,3 +77,49 @@ def run_setup(
     write_json_atomic(state_dir / TRUSTED_TAPS_FILE, sorted(taps))
     seeded = seed_caveat_hashes(seen, installed_caveats)
     return SetupResult(taps, seeded)
+
+
+def setup_command(
+    *,
+    snapshot: Callable[[], Snapshot],
+    installed_caveats: Callable[[], Mapping[str, str | None]],
+    seen: SeenStorePort,
+    state_dir: Path,
+    ask: Callable[[str], str],
+    say: Callable[[str], None],
+    ollama_digest: Callable[[], str | None] | None,
+    model: str,
+) -> int:
+    """[I4] ``morning-brew setup``: a fresh snapshot, then the owner's y/N."""
+    snap = snapshot()
+    caveats = installed_caveats()
+    hint = None
+    if ollama_digest is not None:
+        try:
+            digest = ollama_digest()
+        except (ModelUnavailable, ModelInvalidOutput):
+            digest = None  # Ollama down: no hint, setup goes on
+        if digest:
+            hint = (
+                f"  Ollama is up and {strip_control(model)} has digest {digest};\n"
+                f'  to pin it, set local_digest = "sha256:{digest}" in config.toml'
+            )
+    confirmed = False
+
+    def confirm(text: str) -> bool:
+        nonlocal confirmed
+        say(text)
+        try:
+            answer = ask("Proceed? [y/N] ")
+        except EOFError:
+            answer = ""
+        confirmed = answer.strip().lower() == "y"
+        return confirmed
+
+    result = run_setup(snap, caveats, seen, state_dir, confirm, digest_hint=hint)
+    if not confirmed:
+        say("Setup cancelled; nothing written.")
+        return EXIT_OK
+    taps = ", ".join(sorted(result.trusted_taps)) or "none"
+    say(f"Trusted taps: {taps}. Caveat hashes recorded: {result.seeded}.")
+    return EXIT_OK
