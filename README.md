@@ -18,9 +18,18 @@ recorded second opinion and never decides anything.
 ```sh
 uv sync --frozen --extra claude
 fnox set ANTHROPIC_API_KEY          # run inside the repo
+morning-brew setup                  # confirm trusted taps, seed caveat hashes
 morning-brew install --dry-run      # preview the LaunchAgent plist
 morning-brew install
 ```
+
+- `setup` takes a fresh read-only snapshot and shows what it will do: trust
+  the non-core taps your installed formulae come from, and record the caveat
+  hash of every installed formula (existing hashes are never overwritten),
+  so only caveats that change later count as news. It writes nothing unless
+  you answer `y` (anything else, or end of input, cancels). If a local Ollama
+  is up it also prints the current `qwen3:4b` digest and the exact
+  `local_digest = "sha256:..."` line to pin it.
 
 - Put the key in the repo's `fnox.toml` with `fnox set`. The tool fetches it
   with `fnox get --config <repo>/fnox.toml`, because a launchd job has no
@@ -28,7 +37,7 @@ morning-brew install
   environment, the config or the logs.
 - `install` writes `~/Library/LaunchAgents/com.morningbrew.run.plist` and
   bootstraps it. The agent runs `<repo>/.venv/bin/morning-brew run` every
-  3600 seconds. A run does nothing before the earliest hour (`earliest_hour`,
+  `start_interval` seconds (default 3600). A run does nothing before the earliest hour (`earliest_hour`,
   default 7) and completes at most once per local day.
 - Logs go to `~/Library/Logs/morning-brew/` (`stdout.log`, `stderr.log`).
 - `morning-brew run --dry-run` decides and records nothing mutating.
@@ -72,8 +81,20 @@ Notes:
   at a different digest, the local stage turns itself off with a warning and
   Claude still runs.
 - `notify_command` is an extra urgent channel. Urgent alerts always use
-  `say`; normal ones use a macOS notification. Urgent alerts are throttled
-  and respect `quiet_hours` (22:00 to 07:00 by default).
+  `say` plus the macOS notification; normal ones use the notification only.
+  Only normal notifications are silenced by `quiet_hours` (22:00 to 07:00 by
+  default); urgent alerts (dead-man, anomalies, a Claude key failure, live
+  mode locked) are NOT silenced by quiet hours. They are throttled instead:
+  the same alert is not repeated within 6 hours.
+- Once a week (the first run at least 7 days after the last one) a hold
+  digest goes out through the normal notification: counts of decided,
+  blocked-by-dependency and transient holds, and the names and versions of
+  stale holds (never hold reasons). Quiet hours delay it to a later run. The
+  last send time is `digest.json` in the state directory.
+- `start_interval`, `untrusted_text_cap` (the caveat length above which a
+  caveat is held as suspicious, and the prompt truncation),
+  `local_num_predict`, `ollama_timeout_s` and `fnox_timeout_s` are passed to
+  the plist, the triage chain, the Ollama client and `fnox get`.
 - `trusted_taps` adds to the taps you confirmed during setup, which are kept
   in `trusted_taps.json` in the state directory.
 
@@ -81,7 +102,12 @@ Notes:
 
 `chain_mode` starts as `"shadow"`: the model chain runs and its verdicts are
 recorded as "would be" outcomes, but it approves nothing. `morning-brew
-status` shows `shadow runs: N/10` while in shadow mode.
+status` shows `shadow runs: N/10` while in shadow mode. A shadow hold is the
+chain working as designed, not a failure: it does not make the run degraded,
+so the once-per-day gate applies and shadow holds are re-triaged once per
+day (on the next day's run), not every hour. Real transient holds (Claude
+down, run budget, brew busy, a formula brew lists without info) still make
+the run degraded and are retried hourly.
 
 To earn live mode:
 
@@ -100,29 +126,42 @@ To earn live mode:
 
 Any change to the corpus or its labels changes the corpus hash and
 invalidates the recorded pass. With `chain_mode = "live"` and no valid pass,
-every command (including `status`) stops with an error. Recovery: set
-`chain_mode` back to `"shadow"`, run `morning-brew eval`, then switch back.
+the tool fails closed without stopping: the chain is built in shadow mode (no
+model approval is applied), every command still works, and each `run` reports
+the urgent anomaly `live locked: gate not passed`. Recovery: run
+`morning-brew eval` until it passes (it uses the shadow chain meanwhile), or
+set `chain_mode` back to `"shadow"`.
 
-Tests: `uv run pytest -m "not integration"` is hermetic (no brew, Ollama,
-network or API key). `uv run pytest -m integration` is opt-in (the marker is
-not deselected by default, so a plain `uv run pytest` includes it). It touches
-the real `brew` read-only (`run --dry-run`, asserting no mutating command is
-issued; state goes to a temporary directory) and a real local Ollama. The
-Ollama round trip requires a pinned digest in `BREW_TRIAGE_OLLAMA_DIGEST`;
-without it that test fails closed.
+Tests: a plain `uv run pytest` is hermetic (no brew, Ollama, network or API
+key): `pyproject.toml` sets `addopts = '-m "not integration"'`, and
+`uv run pytest -m "not integration"` is the same thing spelled out.
+`uv run pytest -m integration` is opt-in. It touches the real `brew`
+read-only (`run --dry-run` with a temporary state directory and an explicit
+temporary config file, so your real config and state are never read; only
+an allowlist of read-only commands is executed, anything else is blocked and
+fails the test) and a real local Ollama. The Ollama round trip requires a
+pinned digest in `BREW_TRIAGE_OLLAMA_DIGEST`; without it that test fails
+closed.
 
 ## Daily use
 
-- `morning-brew status` prints the last run summary. It exits 1 when the
-  dead-man alarm is on (no full success within 48 hours), 0 otherwise, so it
-  can sit in a prompt or a check.
+- `morning-brew status` prints the last run summary. It recomputes the
+  dead-man alarm from the run stamp at the moment you ask (no full success
+  within `dead_man_hours`, 48 by default, even if no run summary exists yet)
+  and exits 1 when it is on, 0 otherwise, so it can sit in a prompt or a
+  check.
 - `morning-brew explain <pkg> [--json]` shows the audit trail for a package,
   or with `--json` its latest decision, rule id, component and hold kind.
 - `morning-brew review` walks the decided holds one by one: `a` approve
   (upgrades the whole component with an explicit `brew upgrade -- ...`),
   `s` skip this version (it will not be auto-upgraded, and no pin is made),
-  `d` defer. If a member of the component is live (a running service or
-  process), approval needs you to type `yes`.
+  `d` defer. Before upgrading, approval lists every other member of the
+  component that has a hold or that you skipped, and needs `y` (anything
+  else aborts); a component with a pinned member is refused outright; brew's
+  own `upgrade --dry-run` plan must match the component exactly. If a member
+  is live (a running service or process), approval also needs you to type
+  `yes`. `review` holds the run lock for its whole duration: while a
+  scheduled run is in progress it says so and exits 75.
 
 ## Self-dependencies
 
@@ -173,7 +212,8 @@ State lives in `~/.local/state/morning-brew/` (directory mode 0700, files
 | `gate.json` | the recorded eval pass |
 | `urgent_throttle.json` | urgent notification throttle |
 | `trusted_taps.json` | taps you confirmed during setup |
-| `run.lock` | single-run lock |
+| `digest.json` | when the weekly hold digest was last sent (`last_digest_ts`) |
+| `run.lock` | single-run lock (also held by `review`) |
 
 - Clear one hold: delete its file, e.g. `rm ~/.local/state/morning-brew/holds/<package>.json`.
   A package whose name contains `/` is stored with `%2F`. The next run

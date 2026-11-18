@@ -62,3 +62,15 @@ def test_no_print_outside_cli():
         check=False,
     )
     assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_readme_documents_final_fix_behaviour():
+    t = _text()
+    assert "NOT silenced by quiet hours" in t  # urgent alerts
+    assert "respect `quiet_hours`" not in t
+    assert "morning-brew setup" in t
+    assert "digest.json" in t and "weekly" in t
+    assert "once per\nday" in t or "once per day" in t  # shadow holds
+    assert "live locked: gate not passed" in t  # R56
+    assert "stops with an error" not in t
+    assert "addopts" in t
