@@ -24,7 +24,7 @@ morning-brew install
 ```
 
 - `setup` takes a fresh read-only snapshot and shows what it will do: trust
-  the non-core taps your installed formulae come from, and record the caveat
+  the non-core taps of your currently outdated formulae, and record the caveat
   hash of every installed formula (existing hashes are never overwritten),
   so only caveats that change later count as news. It writes nothing unless
   you answer `y` (anything else, or end of input, cancels). If a local Ollama

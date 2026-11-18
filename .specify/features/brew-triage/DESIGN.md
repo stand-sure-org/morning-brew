@@ -184,7 +184,7 @@ Failure matrix (each row also in SPEC):
 | Concurrent run | exit immediately (75) | n/a |
 | Already ran today / before earliest hour | no-op, exit 0 | n/a |
 | Notifier raises | swallowed | n/a |
-| State dir unwritable | abort before mutation, exit 1 | n/a |
+| State dir unwritable | abort before mutation, degraded attempt stamped (best effort) and dead-man checked, exit 1 [I1] | n/a |
 | Run budget (20 min) exceeded | remaining GREY members excluded | transient |
 
 ## 11. Evaluation: golden set, shadow mode, ship gate [PANEL, trimmed]
