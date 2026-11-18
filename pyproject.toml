@@ -23,6 +23,8 @@ packages = ["src/morning_brew"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# [I8] hermetic by default; `-m integration` on the command line overrides it
+addopts = '-m "not integration"'
 markers = ["integration: touches real brew, Ollama, network, or an API key"]
 
 [tool.ruff]
