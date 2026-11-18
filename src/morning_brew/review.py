@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from morning_brew.domain import (
+    EXIT_OK,
+    EXIT_TEMPFAIL,
     AuditEvent,
     BrewBusyError,
     Decision,
@@ -17,6 +19,7 @@ from morning_brew.domain import (
     HoldKind,
     InvalidPackageName,
     Kind,
+    LockHeld,
     Snapshot,
     Verdict,
 )
@@ -26,6 +29,7 @@ from morning_brew.ports import (
     ComponentsFn,
     HoldStorePort,
     LiveProcessPort,
+    LockPort,
 )
 from morning_brew.sanitize import tail_redacted
 from morning_brew.textsafe import strip_control
@@ -99,6 +103,16 @@ def review(
             record(h.name, "deferred", "not a formula")
             deferred.append(h.name)
             return False
+        by_name = {c.full_name: c for c in snapshot.candidates}
+        pinned = sorted(m for m in members if by_name.get(m) and by_name[m].pinned)
+        if pinned:  # [I7] the owner's pin wins; the tool never upgrades it
+            say(
+                f"{h.name}: refused, the component has pinned members: "
+                + ", ".join(pinned)
+            )
+            record(h.name, "deferred", "pinned member")
+            deferred.append(h.name)
+            return False
         if self_deps.intersection(members):
             say(
                 f"{h.name}: the component contains a self-dependency of this "
@@ -106,6 +120,27 @@ def review(
             )
             say("  brew upgrade -- " + " ".join(members))
             record(h.name, "deferred", "self-dependency; manual command shown")
+            deferred.append(h.name)
+            return False
+        flagged = _flag_members(h.name, members, holds)
+        if flagged:  # [I7] approving one hold must not silently clear others
+            say("Approving upgrades the whole component, including:")
+            for line in flagged:
+                say(f"  {line}")
+            if prompt("Type 'y' to upgrade them too: ") != "y":
+                say("Not confirmed; nothing upgraded.")
+                record(h.name, "deferred", "component members not confirmed")
+                deferred.append(h.name)
+                return False
+        closure = brew.dry_run_closure(members)
+        if closure != frozenset(members):  # [I7] brew would touch more or less
+            extra = ", ".join(sorted(closure - set(members)))
+            missing = ", ".join(sorted(set(members) - closure))
+            say(
+                f"{h.name}: brew's upgrade plan differs from the component "
+                f"(extra [{extra}] missing [{missing}]); nothing upgraded."
+            )
+            record(h.name, "deferred", "closure mismatch")
             deferred.append(h.name)
             return False
         live_members = sorted(set(members) & live.live_set(snapshot))
@@ -147,7 +182,16 @@ def review(
         if h.kind is HoldKind.DECIDED and h.skipped_for_version != h.held_at_version
     ]
     try:
-        for h in pending:
+        for listed in pending:
+            # [I7] re-read: an earlier approval may have released this hold,
+            # or a skip changed it, since the list was taken
+            h = holds.get(listed.name)
+            if (
+                h is None
+                or h.kind is not HoldKind.DECIDED
+                or h.skipped_for_version == h.held_at_version
+            ):
+                continue
             _show(h, now, say)
             for _ in range(_MAX_ATTEMPTS):
                 answer = prompt(_PROMPT)
@@ -171,6 +215,41 @@ def review(
     except _Stop:
         say("Input ended; review stopped.")
     return ReviewResult(tuple(approved), tuple(skipped), tuple(deferred))
+
+
+def locked_review(
+    lock: LockPort, run: Callable[[], object], say: Callable[[str], None]
+) -> int:
+    """[I7] Hold the run lock for the whole review, so a scheduled run and the
+    owner never upgrade or rewrite holds at the same time."""
+    try:
+        with lock.acquire():
+            run()
+    except LockHeld:
+        say("a run is in progress; try again when it finishes")
+        return EXIT_TEMPFAIL
+    return EXIT_OK
+
+
+def _flag_members(
+    name: str, members: tuple[str, ...], holds: HoldStorePort
+) -> list[str]:
+    """Other members with a hold row, each with why it is held."""
+    lines: list[str] = []
+    for member in members:
+        if member == name:
+            continue
+        other = holds.get(member)
+        if other is None:
+            continue
+        if other.skipped_for_version is not None and (
+            other.skipped_for_version == other.held_at_version
+        ):
+            why = f"skipped by you for {other.held_at_version}"
+        else:
+            why = f"held ({other.kind.value}): {other.reason}"
+        lines.append(strip_control(f"{member}: {why}"))
+    return lines
 
 
 def _component_of(

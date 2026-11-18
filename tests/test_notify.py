@@ -275,3 +275,61 @@ def test_throttled_downgrade_still_respects_quiet_hours(tmp_path):
     clock.now = datetime(2026, 11, 17, 23, 0)
     f.notify(summary(dead_man=True), urgent=True)
     assert r.count("say") == 1 and r.count("osascript") == 1
+
+
+# --- I9 / R57: weekly digest through the normal channel ----------------------
+
+
+def test_notify_text_goes_to_normal_channel_only():
+    r = FakeRunner()
+    assert fan(r).notify_text("morning-brew weekly hold digest\n2 decided") is True
+    assert r.count("osascript") == 1 and r.count("say") == 0
+    assert r.count(USER_CMD[0]) == 0
+    argv = r.calls[0][0]
+    assert "\n" not in argv[3] and "weekly" in argv[3]
+
+
+def test_notify_text_in_quiet_hours_is_not_delivered():
+    r = FakeRunner()
+    assert fan(r, hour=23).notify_text("digest") is False
+    assert r.calls == []
+
+
+def test_notify_text_strips_control_characters():
+    r = FakeRunner()
+    fan(r).notify_text("digest \x1b[31mred\x07")
+    text = r.calls[0][0][3]
+    assert "\x1b" not in text and "\x07" not in text
+
+
+def test_notify_text_failure_is_not_delivered():
+    class Boom(NotificationNotifier):
+        def notify_text(self, text: str) -> None:
+            raise RuntimeError("osascript gone")
+
+    f = FanOutNotifier(
+        normal=[Boom(FakeRunner())], urgent=[], quiet_hours=(22, 7), clock=at(12)
+    )
+    assert f.notify_text("digest") is False
+
+
+def test_digest_channel_persists_last_digest_ts(tmp_path):
+    from morning_brew.notify import DigestChannel
+
+    r = FakeRunner()
+    path = tmp_path / "digest.json"
+    ch = DigestChannel(fan(r), path)
+    assert ch.last_sent() is None
+    assert ch.send("digest") is True
+    when = datetime(2026, 11, 17, 12, 30).astimezone()
+    ch.record_sent(when)
+    assert DigestChannel(fan(r), path).last_sent() == when
+    assert json.loads(path.read_text()) == {"last_digest_ts": when.isoformat()}
+
+
+def test_digest_channel_unreadable_state_is_none(tmp_path):
+    from morning_brew.notify import DigestChannel
+
+    path = tmp_path / "digest.json"
+    path.write_text('{"last_digest_ts": "not a date"}')
+    assert DigestChannel(fan(FakeRunner()), path).last_sent() is None

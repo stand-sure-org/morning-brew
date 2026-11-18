@@ -231,3 +231,101 @@ def test_skipped_holds_not_relisted() -> None:
 def test_answers_normalised(ans: str) -> None:
     env = Env([hold("grype")])
     assert env.run([ans]).approved == ("grype",)
+
+
+# --- I7: approve checks the whole component; review holds the run lock ------
+
+
+class Asker:
+    def __init__(self, answers: list[str]) -> None:
+        self._ask = script(answers)
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self._ask(prompt)
+
+
+def run_env(env: Env, asker: Asker) -> ReviewResult:
+    return review(
+        env.holds, env.brew, plan_components, env.live, env.audit,
+        ask=asker, say=env.out.append, now=NOW, run_id="r",
+    )  # fmt: skip
+
+
+def test_review_refuses_component_with_pinned_member() -> None:
+    env = Env([hold("awscli")])
+    env.brew.snapshots = [
+        make_snapshot(
+            make_candidate("awscli", runtime_deps=("aws-c-auth",)),
+            make_candidate("aws-c-auth", runtime_deps=("aws-c-s3",)),
+            make_candidate("aws-c-s3", pinned=True),
+        )
+    ]
+    asker = Asker(["a"])
+    r = run_env(env, asker)
+    assert env.brew.upgrades == [] and r.deferred == ("awscli",)
+    assert any("pinned" in line and "aws-c-s3" in line for line in env.out)
+    assert len(asker.prompts) == 1  # refused outright, no confirmation asked
+
+
+def test_review_flags_other_held_member_and_aborts_without_y() -> None:
+    env = Env([hold("awscli"), hold("aws-c-auth")])
+    asker = Asker(["a", "n", "d"])
+    r = run_env(env, asker)
+    assert env.brew.upgrades == []
+    assert any("aws-c-auth" in line and "held" in line for line in env.out)
+    assert "awscli" in r.deferred
+
+
+def test_review_flags_owner_skipped_member() -> None:
+    env = Env(
+        [hold("awscli"), hold("aws-c-s3", skipped_for_version="1.0.1")],
+    )
+    asker = Asker(["a", ""])
+    run_env(env, asker)
+    assert env.brew.upgrades == []
+    assert any("aws-c-s3" in line and "skipped" in line for line in env.out)
+
+
+def test_review_y_upgrades_and_released_member_is_not_reprompted() -> None:
+    env = Env([hold("awscli"), hold("aws-c-auth")])
+    asker = Asker(["a", "y"])
+    r = run_env(env, asker)
+    assert env.brew.upgrades == [("aws-c-auth", "aws-c-s3", "awscli")]
+    assert r.approved == ("awscli",)
+    # aws-c-auth's hold went with the component: re-read, not prompted again
+    assert len(asker.prompts) == 2
+    assert not any(line.startswith("aws-c-auth held at") for line in env.out)
+
+
+def test_review_closure_mismatch_aborts() -> None:
+    env = Env([hold("grype")])
+    env.brew.closure = {"grype": frozenset({"grype", "surprise"})}
+    r = run_env(env, Asker(["a"]))
+    assert env.brew.upgrades == [] and r.deferred == ("grype",)
+    assert any("surprise" in line for line in env.out)
+
+
+def test_locked_review_reports_a_run_in_progress() -> None:
+    from morning_brew.domain import LockHeld
+    from morning_brew.review import locked_review
+
+    class HeldLock:
+        def acquire(self):
+            raise LockHeld("held")
+
+    out: list[str] = []
+    ran: list[int] = []
+    assert locked_review(HeldLock(), lambda: ran.append(1), out.append) == 75
+    assert ran == [] and any("a run is in progress" in line for line in out)
+
+
+def test_locked_review_holds_the_lock_for_the_whole_review() -> None:
+    from fakes import FakeLock
+    from morning_brew.review import locked_review
+
+    calls: list[str] = []
+    lock = FakeLock(calls)
+    assert locked_review(lock, lambda: calls.append("review"), lambda s: None) == 0
+    assert calls == ["lock", "review"]

@@ -91,6 +91,11 @@ class NotificationNotifier:
         argv = ["osascript", "-e", self.SCRIPT, _notification_text(summary), TITLE]
         self._runner(argv, TIMEOUT)
 
+    def notify_text(self, text: str) -> None:
+        """[R57] Free text built by the tool (the digest); still clipped."""
+        argv = ["osascript", "-e", self.SCRIPT, _clip(text, NOTIFICATION_MAX), TITLE]
+        self._runner(argv, TIMEOUT)
+
 
 class SayNotifier:
     def __init__(self, runner: CommandRunner) -> None:
@@ -142,6 +147,31 @@ class FanOutNotifier:
                 self._safely(notifier, summary, urgent)
             self._record(signature, now)
 
+    def notify_text(self, text: str) -> bool:
+        """[R57] Normal channel only, silenced by quiet hours.
+
+        True only when at least one normal notifier delivered it, so a caller
+        can retry what quiet hours or a broken notifier swallowed.
+        """
+        if self._is_quiet(self._clock()):
+            return False
+        delivered = False
+        for notifier in self._normal:
+            send = getattr(notifier, "notify_text", None)
+            if send is None:
+                continue
+            try:
+                send(text)
+            except Exception as exc:
+                log.warning(
+                    "notifier %s failed: %s",
+                    type(notifier).__name__,
+                    type(exc).__name__,
+                )
+                continue
+            delivered = True
+        return delivered
+
     def _is_quiet(self, now: datetime) -> bool:
         start, end = self._quiet
         if start > end:
@@ -182,3 +212,30 @@ class FanOutNotifier:
 
 def _signature(summary: Summary) -> str:
     return json.dumps([sorted(summary.anomalies), summary.dead_man])
+
+
+class DigestChannel:
+    """[R57] ``DigestPort``: the weekly digest via the normal notifier.
+
+    ``last_digest_ts`` lives in the state dir; an unreadable file means
+    "never sent", so a broken file costs at most one extra digest.
+    """
+
+    def __init__(self, notifier: FanOutNotifier, path: Path) -> None:
+        self._notifier = notifier
+        self._path = path
+
+    def last_sent(self) -> datetime | None:
+        try:
+            data = read_json_or_none(self._path)
+            if not isinstance(data, dict):
+                return None
+            return datetime.fromisoformat(str(data["last_digest_ts"]))
+        except (KeyError, ValueError, TypeError, OSError):
+            return None
+
+    def send(self, text: str) -> bool:
+        return self._notifier.notify_text(text)
+
+    def record_sent(self, when: datetime) -> None:
+        write_json_atomic(self._path, {"last_digest_ts": when.isoformat()})
