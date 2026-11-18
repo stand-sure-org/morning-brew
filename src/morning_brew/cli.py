@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import re
 import sys
 from collections.abc import Callable, Sequence
@@ -24,6 +25,7 @@ from morning_brew.domain import (
 )
 from morning_brew.orchestrator import run_once
 from morning_brew.ports import Ports
+from morning_brew.schedule import dead_man
 from morning_brew.shadow import ShadowReport
 from morning_brew.summary import render_summary
 from morning_brew.textsafe import strip_control
@@ -44,6 +46,9 @@ _CLEAN_ERRORS = (
     OSError,
 )
 UNLABELED_MESSAGE = "label the 10 real caveats in golden-real-caveats.md first"
+GATE_LOCKED_ANOMALY = "live locked: gate not passed"  # [R56]
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_logging_configured = False
 GATE_HINT = (
     'set chain_mode = "shadow", run `morning-brew eval` until it passes, '
     "then switch back to live"
@@ -62,6 +67,10 @@ class CliDeps:
     # [C12] The run's Claude client error kind ("auth" / "secret" / None).
     triage_error: Callable[[], str | None] | None = None
     shadow: Callable[[], ShadowReport] | None = None
+    # [R56] live mode was asked for but the gate has not passed: the chain was
+    # built in shadow mode and ``run`` reports an urgent anomaly.
+    gate_locked: bool = False
+    setup: Callable[[], int] | None = None
 
 
 def _emit(text: str) -> None:
@@ -90,25 +99,30 @@ def _parser() -> argparse.ArgumentParser:
     ins.add_argument("--dry-run", action="store_true")
     sub.add_parser("uninstall", help="remove the launchd agent")
     sub.add_parser("eval", help="run the golden-set evaluation")
+    sub.add_parser("setup", help="confirm trusted taps and seed caveat hashes")
     return p
 
 
+def _alarms(deps: CliDeps) -> Callable[[], tuple[str, ...]]:
+    """[M6] Read by the orchestrator after triage: one summary, one notify."""
+
+    def alarms() -> tuple[str, ...]:
+        out: list[str] = []
+        if deps.gate_locked:
+            out.append(GATE_LOCKED_ANOMALY)
+        kind = deps.triage_error() if deps.triage_error is not None else None
+        if kind in _CLAUDE_ALARMS:
+            # [C12] A stale or missing key would otherwise hold GREY forever.
+            out.append(f"claude {kind} failure: check the API key (fnox)")
+        return tuple(out)
+
+    return alarms
+
+
 def _cmd_run(deps: CliDeps, dry_run: bool) -> int:
-    result = run_once(deps.ports, deps.config, dry_run=dry_run)
-    summary = result.summary
-    kind = deps.triage_error() if deps.triage_error is not None else None
-    if summary is not None and kind in _CLAUDE_ALARMS:
-        # [C12] A stale or missing key would otherwise hold GREY members forever.
-        anomaly = f"claude {kind} failure: check the API key (fnox)"
-        summary = replace(summary, anomalies=(*summary.anomalies, anomaly))
-        if not dry_run:  # a dry run records and notifies nothing
-            deps.ports.status.write(summary)
-            try:
-                deps.ports.notifier.notify(summary, urgent=True)
-            except Exception as exc:  # a broken notifier must never fail the run
-                _err(f"notifier failed: {type(exc).__name__}")
-    if summary is not None:
-        _emit(render_summary(summary))
+    result = run_once(deps.ports, deps.config, dry_run=dry_run, alarms=_alarms(deps))
+    if result.summary is not None:
+        _emit(render_summary(result.summary))
     return result.exit_code
 
 
@@ -119,14 +133,19 @@ def _shadow_line(deps: CliDeps) -> None:
 
 
 def _cmd_status(deps: CliDeps) -> int:
-    summary = deps.ports.status.read()
+    # [I2] The dead-man is recomputed now, from the stamp: the last summary
+    # cannot know how long ago it was written.
+    ports = deps.ports
+    stale = dead_man(ports.clock(), ports.stamp.read(), deps.config.dead_man_hours)
+    summary = ports.status.read()
     if summary is None:
         _emit("no runs recorded")
-        _shadow_line(deps)
-        return EXIT_OK
-    _emit(render_summary(summary))
+        if stale:
+            _emit("DEAD-MAN: no successful run within the allowed window")
+    else:
+        _emit(render_summary(replace(summary, dead_man=stale)))
     _shadow_line(deps)
-    return EXIT_ERROR if summary.dead_man else EXIT_OK
+    return EXIT_ERROR if stale else EXIT_OK
 
 
 def _latest_run_events(events: Sequence[AuditEvent]) -> list[AuditEvent]:
@@ -188,11 +207,21 @@ def _cmd_install(deps: CliDeps, dry_run: bool) -> int:
     return EXIT_OK
 
 
+def _configure_logging() -> None:
+    """[M5] The entry point owns logging; library code only gets loggers."""
+    global _logging_configured
+    if _logging_configured:
+        return
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    _logging_configured = True
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     deps_factory: Callable[[], CliDeps] | None = None,
 ) -> int:
+    _configure_logging()
     try:
         args = _parser().parse_args(argv)
     except SystemExit as exc:
@@ -233,5 +262,10 @@ def _dispatch(args: argparse.Namespace, deps: CliDeps) -> int:
             return deps.uninstall()
         case "eval":
             return deps.eval()
+        case "setup":
+            if deps.setup is None:
+                _err("setup is unavailable: not wired")
+                return EXIT_ERROR
+            return deps.setup()
     _err(f"unknown command: {args.command}")  # pragma: no cover
     return EXIT_USAGE  # pragma: no cover

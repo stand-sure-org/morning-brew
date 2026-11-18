@@ -36,11 +36,13 @@ class Runner:
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.timeouts: list[float] = []
 
     def __call__(
         self, argv: Any, timeout: float, input: str | None = None
     ) -> CommandResult:
         self.calls.append(list(argv))
+        self.timeouts.append(timeout)
         return CommandResult(0, "value\n", "")
 
 
@@ -58,10 +60,11 @@ class SpyClaude:
 class SpyChain:
     instances: list["SpyChain"] = []
 
-    def __init__(self, local: Any, claude: Any, mode: str) -> None:
+    def __init__(self, local: Any, claude: Any, mode: str, **kw: Any) -> None:
         self.local = local
         self.claude = claude
         self.mode = mode
+        self.kw = kw
         SpyChain.instances.append(self)
 
 
@@ -102,14 +105,56 @@ def build(tmp_path: Path, body: str = "", runner: Runner | None = None, **kw: An
 
 
 def test_build_deps_refuses_live_without_gate(tmp_path):
-    with pytest.raises(GateNotPassed):
-        build(tmp_path, 'chain_mode = "live"\n')
+    # [R56] refused as live: built in shadow mode and flagged for `run`
+    deps = build(tmp_path, 'chain_mode = "live"\n')
+    assert deps.gate_locked is True
+    assert deps.config.chain_mode == "shadow"
+    assert [c.mode for c in SpyChain.instances] == ["shadow"]
 
 
 def test_build_deps_refuses_live_without_gate_before_building_chain(tmp_path):
-    with pytest.raises(GateNotPassed):
-        build(tmp_path, 'chain_mode = "live"\n')
-    assert SpyChain.instances == []
+    build(tmp_path, 'chain_mode = "live"\n')
+    assert "live" not in [c.mode for c in SpyChain.instances]
+
+
+def test_gate_failure_uses_require_gate(tmp_path, monkeypatch):
+    seen: list[str] = []
+
+    def fake_require(config, gate):
+        seen.append(config.chain_mode)
+        raise GateNotPassed("no")
+
+    monkeypatch.setattr(wiring, "require_gate", fake_require)
+    deps = build(tmp_path, 'chain_mode = "live"\n')
+    assert seen == ["live"] and deps.gate_locked
+
+
+@pytest.mark.parametrize("cmd", [["status"], ["explain", "wget"]])
+def test_read_commands_work_when_gate_locked(tmp_path, cmd, capsys):
+    deps = build(tmp_path, 'chain_mode = "live"\n')
+    rc = cli.main(cmd, deps_factory=lambda: deps)
+    assert rc in (0, 2)  # explain of an unknown package is a usage error
+    assert "GateNotPassed" not in capsys.readouterr().err
+
+
+def test_eval_when_gate_locked_runs_the_shadow_chain(tmp_path, monkeypatch):
+    got: list[Any] = []
+
+    def fake_record(self, triage, audit, run_id, now):
+        got.append(triage)
+        return EvalReport(total=1, false_approves=(), missed_upgrades=())
+
+    monkeypatch.setattr(GateStore, "record_eval", fake_record)
+    monkeypatch.setattr(wiring, "eval_exit_code", lambda r, c: 0)
+    deps = build(tmp_path, 'chain_mode = "live"\n')
+    assert cli.main(["eval"], deps_factory=lambda: deps) == 0
+    (triage,) = got
+    assert triage.mode == "shadow"  # eval never approves live
+
+
+def test_shadow_with_passing_gate_is_not_locked(tmp_path, monkeypatch):
+    monkeypatch.setattr(GateStore, "passed", lambda self: True)
+    assert build(tmp_path, 'chain_mode = "live"\n').gate_locked is False
 
 
 def test_build_deps_live_with_passing_gate_builds_live_chain(tmp_path, monkeypatch):
@@ -352,7 +397,11 @@ def test_print_plist_points_at_venv_binary(tmp_path):
 
 def test_install_and_uninstall_bind_launchd_with_uid(tmp_path, monkeypatch):
     got: list[tuple] = []
-    monkeypatch.setattr(wiring.launchd, "install", lambda *a: got.append(("i", *a)))
+    monkeypatch.setattr(
+        wiring.launchd,
+        "install",
+        lambda *a, **k: got.append(("i", *a, k.get("start_interval"))),
+    )
     monkeypatch.setattr(wiring.launchd, "uninstall", lambda *a: got.append(("u", *a)))
     runner = Runner()
     deps = build(tmp_path, runner=runner)
@@ -360,7 +409,7 @@ def test_install_and_uninstall_bind_launchd_with_uid(tmp_path, monkeypatch):
     venv_bin = tmp_path / "proj" / ".venv" / "bin" / "morning-brew"
     home = Path(os.environ["HOME"])
     assert got == [
-        ("i", runner, venv_bin, home, os.getuid()),
+        ("i", runner, venv_bin, home, os.getuid(), 3600),
         ("u", runner, home, os.getuid()),
     ]
 
@@ -372,3 +421,91 @@ def test_shadow_hook_reads_audit_log(tmp_path):
     deps = build(tmp_path)
     assert deps.shadow is not None
     assert deps.shadow().runs == 0
+
+
+# --- I5 / R58: config keys reach their consumers -------------------------------
+
+
+def test_start_interval_reaches_plist_and_install(tmp_path, monkeypatch):
+    got: list[Any] = []
+    monkeypatch.setattr(
+        wiring.launchd, "install", lambda *a, **k: got.append(k["start_interval"])
+    )
+    deps = build(tmp_path, "start_interval = 900\n")
+    plist = deps.print_plist().decode()
+    assert "<key>StartInterval</key>" in plist and "<integer>900</integer>" in plist
+    deps.install()
+    assert got == [900]
+
+
+def test_untrusted_text_cap_reaches_chain(tmp_path):
+    build(tmp_path, "untrusted_text_cap = 1234\n")
+    assert SpyChain.instances[0].kw["untrusted_cap"] == 1234
+
+
+def test_ollama_num_predict_and_timeout_reach_client(tmp_path):
+    build(
+        tmp_path,
+        'local_digest = "sha256:abc"\nlocal_num_predict = 77\nollama_timeout_s = 9\n',
+    )
+    local = SpyChain.instances[0].local
+    assert isinstance(local, OllamaClient)
+    assert local._num_predict == 77 and local._timeout == 9
+
+
+def test_fnox_timeout_reaches_fnox_get(tmp_path):
+    runner = Runner()
+    build(tmp_path, "fnox_timeout_s = 3\n", runner=runner)
+    (claude,) = SpyClaude.instances
+    claude.key_provider()
+    assert runner.timeouts == [3]
+
+
+# --- I4: setup ------------------------------------------------------------------
+
+
+def test_setup_binds_snapshot_caveats_prompt_and_ollama(tmp_path, monkeypatch):
+    got: dict[str, Any] = {}
+
+    def fake_setup(**kw: Any) -> int:
+        got.update(kw)
+        return 0
+
+    monkeypatch.setattr(wiring, "setup_command", fake_setup)
+    deps = build(tmp_path)
+    assert deps.setup is not None and deps.setup() == 0
+    assert got["snapshot"] == deps.ports.brew.snapshot
+    assert got["installed_caveats"] == deps.ports.brew.installed_caveats
+    assert got["seen"] is deps.ports.seen
+    assert got["state_dir"] == state(tmp_path)
+    assert got["ask"] is builtins.input and got["say"] is cli._emit
+    assert got["model"] == "qwen3:4b"
+    assert callable(got["ollama_digest"])
+
+
+# --- I7: review holds the run lock -------------------------------------------------
+
+
+def test_review_takes_the_run_lock(tmp_path, monkeypatch):
+    from morning_brew.domain import LockHeld
+
+    class HeldLock:
+        def acquire(self):
+            raise LockHeld("busy")
+
+    monkeypatch.setattr(wiring, "review", lambda **kw: None)
+    deps = build(tmp_path)
+    deps.ports.lock = HeldLock()
+    assert deps.review() == 75
+
+
+# --- I9 / R57: weekly digest wired to the normal channel ---------------------------
+
+
+def test_digest_port_is_wired_to_state_dir(tmp_path):
+    from morning_brew.notify import DigestChannel
+
+    deps = build(tmp_path)
+    assert isinstance(deps.ports.digest, DigestChannel)
+    assert deps.ports.digest._path == state(tmp_path) / "digest.json"
+    assert deps.ports.digest.last_sent() is None

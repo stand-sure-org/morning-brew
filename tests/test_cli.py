@@ -1,15 +1,22 @@
 import json
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
-from fakes import FakeAudit, FakeHolds, FakeStatus
+from fakes import FakeAudit, FakeHolds, FakeNotifier, FakeStamp, FakeStatus
 from morning_brew import cli
 from morning_brew.cli import CliDeps, main
 from morning_brew.config import Config
-from morning_brew.domain import AuditEvent, Hold, HoldKind, RunResult, Summary
+from morning_brew.domain import (
+    AuditEvent,
+    Hold,
+    HoldKind,
+    RunResult,
+    Stamp,
+    Summary,
+)
 from morning_brew.summary import render_summary
 from morning_brew.textsafe import strip_control
 
@@ -61,6 +68,9 @@ def make_deps(
     ports.status = FakeStatus(last=summary)
     ports.audit = FakeAudit(calls=[], events=list(events or []))
     ports.holds = holds or FakeHolds()
+    ports.stamp = FakeStamp(calls=[])
+    ports.notifier = FakeNotifier(calls=[])
+    ports.clock = lambda: NOW
     deps = CliDeps(
         ports=ports,
         config=Config(),
@@ -101,7 +111,8 @@ def test_run_dry_run_flag_reaches_orchestrator(monkeypatch):
     monkeypatch.setattr(cli, "run_once", fake_run)
     factory, deps, _ = make_deps()
     assert main(["run", "--dry-run"], deps_factory=factory) == 0
-    assert fake_run.call_args.kwargs == {"dry_run": True}
+    assert fake_run.call_args.kwargs["dry_run"] is True
+    assert callable(fake_run.call_args.kwargs["alarms"])
     assert fake_run.call_args.args == (deps.ports, deps.config)
 
 
@@ -110,7 +121,7 @@ def test_run_without_flag_is_not_dry_and_returns_exit_code(monkeypatch):
     monkeypatch.setattr(cli, "run_once", fake_run)
     factory, _, _ = make_deps()
     assert main(["run"], deps_factory=factory) == 75
-    assert fake_run.call_args.kwargs == {"dry_run": False}
+    assert fake_run.call_args.kwargs["dry_run"] is False
 
 
 def test_run_prints_sanitized_summary(monkeypatch, capsys):
@@ -132,7 +143,35 @@ def test_status_prints_copyable_self_dep_command(capsys):
 
 
 def test_status_dead_man_exit_code():
-    assert main(["status"], deps_factory=with_summary(dead_man=True)) == 1
+    factory, deps, _ = make_deps(summary=make_summary())
+    old = NOW - timedelta(hours=49)
+    deps.ports.stamp.stamp = Stamp(old, old, "full", 3, old)
+    assert main(["status"], deps_factory=factory) == 1
+
+
+def test_status_recomputes_dead_man_from_the_stamp(capsys):
+    # [I2] the summary said healthy, but 49 h have passed since the stamp
+    factory, deps, _ = make_deps(summary=make_summary(dead_man=False))
+    old = NOW - timedelta(hours=49)
+    deps.ports.stamp.stamp = Stamp(old, old, "full", 3, old)
+    assert main(["status"], deps_factory=factory) == 1
+    assert "DEAD-MAN" in capsys.readouterr().out
+
+
+def test_status_stale_summary_flag_is_not_trusted_over_fresh_stamp():
+    factory, deps, _ = make_deps(summary=make_summary(dead_man=True))
+    fresh = NOW - timedelta(hours=2)
+    deps.ports.stamp.stamp = Stamp(fresh, fresh, "full", 3, fresh)
+    assert main(["status"], deps_factory=factory) == 0
+
+
+def test_status_without_summary_still_checks_the_stamp(capsys):
+    factory, deps, _ = make_deps()
+    first = NOW - timedelta(hours=49)
+    deps.ports.stamp.stamp = Stamp(None, first, "degraded", 0, first)
+    assert main(["status"], deps_factory=factory) == 1
+    out = capsys.readouterr().out
+    assert "no runs recorded" in out and "DEAD-MAN" in out
 
 
 def test_status_healthy_exit_code():
@@ -333,67 +372,145 @@ def _raiser(exc: Exception):
     return fn
 
 
-def test_run_surfaces_claude_auth_failure_as_urgent_anomaly(monkeypatch, capsys):
-    from fakes import FakeNotifier
+def capture_run(monkeypatch, summary: Summary) -> dict:
+    """Fake run_once that applies the alarms hook the way the orchestrator does."""
+    seen: dict = {}
 
-    s = make_summary()
-    monkeypatch.setattr(
-        cli, "run_once", lambda *a, **k: RunResult(exit_code=0, summary=s)
-    )
+    def fake(ports, config, *, dry_run=False, alarms=None):
+        seen["dry_run"] = dry_run
+        extra = tuple(alarms()) if alarms is not None else ()
+        seen["alarms"] = extra
+        return RunResult(
+            exit_code=0, summary=replace(summary, anomalies=summary.anomalies + extra)
+        )
+
+    monkeypatch.setattr(cli, "run_once", fake)
+    return seen
+
+
+def test_run_surfaces_claude_auth_failure_as_urgent_anomaly(monkeypatch, capsys):
+    seen = capture_run(monkeypatch, make_summary())
     factory, deps, _ = make_deps()
-    deps.ports.notifier = FakeNotifier(calls=[])
     deps.triage_error = lambda: "auth"
     assert main(["run"], deps_factory=factory) == 0
-    ((sent, urgent),) = deps.ports.notifier.sent
-    assert urgent is True
-    assert any("auth" in a for a in sent.anomalies)
-    assert deps.ports.status.last == sent
+    assert any("auth" in a for a in seen["alarms"])
+    # [M6] the orchestrator notifies once; the CLI never notifies again
+    assert deps.ports.notifier.sent == []
+    assert deps.ports.status.last is None
     assert "auth" in capsys.readouterr().out
 
 
 def test_run_surfaces_claude_secret_failure(monkeypatch):
-    from fakes import FakeNotifier
-
-    s = make_summary()
-    monkeypatch.setattr(
-        cli, "run_once", lambda *a, **k: RunResult(exit_code=0, summary=s)
-    )
+    seen = capture_run(monkeypatch, make_summary())
     factory, deps, _ = make_deps()
-    deps.ports.notifier = FakeNotifier(calls=[])
     deps.triage_error = lambda: "secret"
     main(["run"], deps_factory=factory)
-    ((sent, urgent),) = deps.ports.notifier.sent
-    assert urgent and any("secret" in a for a in sent.anomalies)
+    assert any("secret" in a for a in seen["alarms"])
+    assert deps.ports.notifier.sent == []
 
 
 def test_run_without_claude_error_does_not_renotify(monkeypatch):
-    from fakes import FakeNotifier
-
-    s = make_summary()
-    monkeypatch.setattr(
-        cli, "run_once", lambda *a, **k: RunResult(exit_code=0, summary=s)
-    )
+    seen = capture_run(monkeypatch, make_summary())
     factory, deps, _ = make_deps()
-    deps.ports.notifier = FakeNotifier(calls=[])
     deps.triage_error = lambda: None
     main(["run"], deps_factory=factory)
+    assert seen["alarms"] == ()
     assert deps.ports.notifier.sent == []
 
 
 def test_dry_run_claude_error_is_printed_not_notified(monkeypatch, capsys):
-    from fakes import FakeNotifier
-
-    s = make_summary()
-    monkeypatch.setattr(
-        cli, "run_once", lambda *a, **k: RunResult(exit_code=0, summary=s)
-    )
+    seen = capture_run(monkeypatch, make_summary())
     factory, deps, _ = make_deps()
-    deps.ports.notifier = FakeNotifier(calls=[])
     deps.triage_error = lambda: "auth"
     main(["run", "--dry-run"], deps_factory=factory)
+    assert seen["dry_run"] is True
     assert deps.ports.notifier.sent == []
     assert deps.ports.status.last is None
     assert "auth" in capsys.readouterr().out
+
+
+def test_run_auth_failure_notifies_exactly_once_end_to_end(monkeypatch):
+    """[M6] real run_once: one urgent notification carrying the anomaly."""
+    from builders import make_candidate, make_snapshot
+    from fakes import (
+        FakeBrew,
+        FakeLive,
+        FakeLock,
+        FakeSeen,
+        FakeTriage,
+        grouping_components,
+        recording_reconcile,
+        recording_rules,
+    )
+    from morning_brew.domain import Decision, Verdict
+    from morning_brew.ports import Ports
+
+    calls: list[str] = []
+    ports = Ports(
+        brew=FakeBrew(calls, [make_snapshot(make_candidate("a"))]),
+        live=FakeLive(),
+        rules=recording_rules(calls, [Decision("a", Verdict.ELIGIBLE, "R12", "ok")]),
+        components=grouping_components(calls, [["a"]]),
+        reconcile=recording_reconcile(calls),
+        triage=FakeTriage(calls, {}),
+        holds=FakeHolds(),
+        seen=FakeSeen(),
+        audit=FakeAudit(calls),
+        notifier=FakeNotifier(calls),
+        status=FakeStatus(),
+        lock=FakeLock(calls),
+        stamp=FakeStamp(calls),
+        clock=lambda: NOW,
+    )
+    deps = CliDeps(
+        ports=ports,
+        config=Config(),
+        review=lambda: 0,
+        install=lambda: 0,
+        uninstall=lambda: 0,
+        eval=lambda: 0,
+        triage_error=lambda: "auth",
+        gate_locked=True,
+    )
+    assert main(["run"], deps_factory=lambda: deps) == 0
+    ((sent, urgent),) = ports.notifier.sent
+    assert urgent is True
+    assert any("auth" in a for a in sent.anomalies)
+    assert cli.GATE_LOCKED_ANOMALY in sent.anomalies
+    assert ports.status.last == sent
+
+
+def test_run_gate_locked_adds_urgent_anomaly(monkeypatch):
+    # [R56] live without a gate pass runs as shadow and says so, urgently
+    seen = capture_run(monkeypatch, make_summary())
+    factory, deps, _ = make_deps()
+    deps.gate_locked = True
+    main(["run"], deps_factory=factory)
+    assert seen["alarms"] == ("live locked: gate not passed",)
+
+
+def test_status_with_gate_locked_has_no_anomaly_and_works(capsys):
+    factory, deps, _ = make_deps(summary=make_summary())
+    deps.gate_locked = True
+    assert main(["status"], deps_factory=factory) == 0
+    assert "live locked" not in capsys.readouterr().out
+
+
+def test_main_configures_logging_once(monkeypatch):
+    import logging
+
+    calls: list[dict] = []
+    monkeypatch.setattr(cli, "_logging_configured", False)
+    monkeypatch.setattr(logging, "basicConfig", lambda **kw: calls.append(kw))
+    factory = make_deps()[0]
+    main(["status"], deps_factory=factory)
+    main(["status"], deps_factory=factory)
+    assert calls == [
+        {
+            "level": logging.INFO,
+            "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        }
+    ]
 
 
 @pytest.mark.parametrize("cmd", ["review", "eval", "run"])
@@ -462,3 +579,15 @@ def test_status_no_shadow_line_in_live_mode(capsys):
     deps.shadow = lambda: ShadowReport(3, 2, 1, 0)
     main(["status"], deps_factory=factory)
     assert "shadow runs" not in capsys.readouterr().out
+
+
+def test_setup_subcommand_dispatches(capsys):
+    factory, deps, rec = make_deps()
+    deps.setup = rec.make("setup", 0)
+    assert main(["setup"], deps_factory=factory) == 0
+    assert rec.calls == ["setup"]
+
+
+def test_setup_unwired_is_a_clean_error(capsys):
+    assert main(["setup"], deps_factory=make_deps()[0]) == 1
+    assert "setup" in capsys.readouterr().err

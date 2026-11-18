@@ -3,7 +3,8 @@
 The only place that reads the process environment, ``sys.executable`` and
 ``sys.prefix``. Order matters: the state root is tightened to 0700 before any
 store exists [C6], and the ship gate is checked before the triage chain is
-built [C11], so live mode without a passing eval never constructs a chain.
+built [C11], so live mode without a passing eval never constructs a live
+chain: it falls back to shadow and ``run`` reports it urgently [R56].
 """
 
 import dataclasses
@@ -20,20 +21,21 @@ from morning_brew.brew.runner import SubprocessRunner
 from morning_brew.cli import CliDeps, _emit
 from morning_brew.components import plan_components
 from morning_brew.config import Config, child_env, detect_self_deps, load_config
-from morning_brew.domain import EXIT_OK, CommandRunner
+from morning_brew.domain import EXIT_OK, CommandRunner, ConfigError, GateNotPassed
 from morning_brew.liveprocess import LiveProcessScanner
 from morning_brew.notify import (
     CommandNotifier,
+    DigestChannel,
     FanOutNotifier,
     NotificationNotifier,
     SayNotifier,
 )
 from morning_brew.ports import NotifierPort, Ports
 from morning_brew.reconcile import reconcile
-from morning_brew.review import review
+from morning_brew.review import locked_review, review
 from morning_brew.rules import evaluate_all
 from morning_brew.secrets import fnox_get
-from morning_brew.setup import read_trusted_taps
+from morning_brew.setup import read_trusted_taps, setup_command
 from morning_brew.shadow import ShadowReport, shadow_report
 from morning_brew.store.audit import JsonlAudit
 from morning_brew.store.holds import FileHoldStore
@@ -135,7 +137,8 @@ def build_deps(
     config = load_config(config_path or default_config_path(), state_dir=state_dir)
     config = _effective_config(config, state_dir)
     fnox_config = config.fnox_config
-    assert fnox_config is not None  # set by _effective_config
+    if fnox_config is None:  # [M6] _effective_config always sets it
+        raise ConfigError("no fnox config path could be determined")
 
     # [C7] one allowlisted-env runner for brew, notifiers, ps, lsof and fnox
     run = runner or SubprocessRunner(child_env(os.environ))
@@ -143,10 +146,24 @@ def build_deps(
     home = Path.home()
 
     gate = GateStore(state_dir / "gate.json")
-    require_gate(config, gate)  # [C11] before any chain exists; raises
+    gate_locked = False
+    try:
+        require_gate(config, gate)  # [C11] before any chain exists
+    except GateNotPassed:
+        # [R56] fail closed without failing: no live approvals, every command
+        # still works, and `run` carries an urgent anomaly.
+        log.warning("live chain mode without a passing eval; running as shadow")
+        gate_locked = True
+        config = dataclasses.replace(config, chain_mode="shadow")
 
     local = (
-        ollama.OllamaClient(config.local_model, config.local_digest, runner=run)
+        ollama.OllamaClient(
+            config.local_model,
+            config.local_digest,
+            runner=run,
+            num_predict=config.local_num_predict,  # [R58]
+            timeout=config.ollama_timeout_s,  # [R58]
+        )
         if config.local_digest  # [R48] no pinned digest, no local stage
         else None
     )
@@ -154,14 +171,22 @@ def build_deps(
     claude = ClaudeClient(
         config.claude_model,
         config.claude_effort,
-        key_provider=lambda: fnox_get(config.claude_key_name, run, fnox_config),
+        key_provider=lambda: fnox_get(
+            config.claude_key_name, run, fnox_config, timeout=config.fnox_timeout_s
+        ),
     )
-    chain = TriageChain(local=local, claude=claude, mode=config.chain_mode)
+    chain = TriageChain(
+        local=local,
+        claude=claude,
+        mode=config.chain_mode,
+        untrusted_cap=config.untrusted_text_cap,  # [R58]
+    )
 
     brew = BrewCli(run)
     live = LiveProcessScanner(run, home)
     audit = JsonlAudit(state_dir / "audit.jsonl")
     holds = FileHoldStore(state_dir)
+    notifier = _notifier(config, run, clock)
     ports = Ports(
         brew=brew,
         live=live,
@@ -172,30 +197,51 @@ def build_deps(
         holds=holds,
         seen=FileSeenStore(state_dir / "seen.json"),
         audit=audit,
-        notifier=_notifier(config, run, clock),
+        notifier=notifier,
         status=FileStatusStore(state_dir / "status.json"),
         lock=FileLock(state_dir / "run.lock"),
         stamp=FileStampStore(state_dir / "stamp.json"),
         clock=clock,
         self_deps=detect_self_deps(Path(sys.executable)),  # [R13]
+        digest=DigestChannel(notifier, state_dir / "digest.json"),  # [R57]
     )
     venv_bin = venv_entry_point()
 
     def do_review() -> int:
         now = clock()
-        review(
-            holds=holds,
-            brew=brew,
-            components=plan_components,
-            live=live,
-            audit=audit,
-            ask=input,
-            say=_emit,  # [C15] printing stays in cli.py
-            now=now,
-            run_id=_run_id("review", now),
-            self_deps=ports.self_deps,
+        # [I7] the run lock is held for the whole interactive review
+        return locked_review(
+            ports.lock,
+            lambda: review(
+                holds=holds,
+                brew=brew,
+                components=plan_components,
+                live=live,
+                audit=audit,
+                ask=input,
+                say=_emit,  # [C15] printing stays in cli.py
+                now=now,
+                run_id=_run_id("review", now),
+                self_deps=ports.self_deps,
+            ),
+            _emit,
         )
-        return EXIT_OK
+
+    def do_setup() -> int:
+        # [I4] read-only probe of /api/tags for the digest hint only
+        probe = ollama.OllamaClient(
+            config.local_model, None, timeout=config.ollama_timeout_s
+        )
+        return setup_command(
+            snapshot=brew.snapshot,
+            installed_caveats=brew.installed_caveats,
+            seen=ports.seen,
+            state_dir=state_dir,
+            ask=input,
+            say=_emit,
+            ollama_digest=probe.model_digest,
+            model=config.local_model,
+        )
 
     def do_eval() -> int:
         # [C8/C9] the gate is written by record_eval; exit from THAT report.
@@ -204,7 +250,9 @@ def build_deps(
         return eval_exit_code(report, load_cases())
 
     def do_install() -> int:
-        launchd.install(run, venv_bin, home, os.getuid())
+        launchd.install(
+            run, venv_bin, home, os.getuid(), start_interval=config.start_interval
+        )
         return EXIT_OK
 
     def do_uninstall() -> int:
@@ -221,7 +269,9 @@ def build_deps(
         install=do_install,
         uninstall=do_uninstall,
         eval=do_eval,
-        print_plist=lambda: launchd.render_plist(venv_bin, home),
+        print_plist=lambda: launchd.render_plist(venv_bin, home, config.start_interval),
         triage_error=lambda: claude.last_error_kind,
         shadow=do_shadow,
+        gate_locked=gate_locked,
+        setup=do_setup,
     )
