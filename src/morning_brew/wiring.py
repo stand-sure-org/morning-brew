@@ -21,7 +21,15 @@ from morning_brew.brew.runner import SubprocessRunner
 from morning_brew.cli import CliDeps, _emit
 from morning_brew.components import plan_components
 from morning_brew.config import Config, child_env, detect_self_deps, load_config
-from morning_brew.domain import EXIT_OK, CommandRunner, ConfigError, GateNotPassed
+from morning_brew.domain import (
+    EXIT_OK,
+    CommandRunner,
+    ConfigError,
+    Decision,
+    GateNotPassed,
+    RuleContext,
+    Snapshot,
+)
 from morning_brew.liveprocess import LiveProcessScanner
 from morning_brew.notify import (
     CommandNotifier,
@@ -43,6 +51,7 @@ from morning_brew.store.lock import FileLock
 from morning_brew.store.seen import FileSeenStore
 from morning_brew.store.stamp import FileStampStore
 from morning_brew.store.status import FileStatusStore
+from morning_brew.store.unjoinable import FileUnjoinableStore
 
 # The first-party local-model adapter, not the banned PyPI client package; one
 # name per line so the witness's banned-dependency grep stays exact.
@@ -204,8 +213,23 @@ def build_deps(
         clock=clock,
         self_deps=detect_self_deps(Path(sys.executable)),  # [R13]
         digest=DigestChannel(notifier, state_dir / "digest.json"),  # [R57]
+        unjoinable_seen=FileUnjoinableStore(state_dir / "unjoinable.json"),
     )
     venv_bin = venv_entry_point()
+
+    def review_rules(snapshot: Snapshot) -> list[Decision]:
+        # [FR-080] the same rules and context a run would use, on review's
+        # fresh snapshot, so non-ELIGIBLE component members are flagged
+        ctx = RuleContext(
+            live=live.live_set(snapshot),
+            trusted_taps=config.trusted_taps,
+            self_deps=ports.self_deps,
+            now=clock(),
+            min_age_days=config.min_age_days,
+            first_seen=ports.seen.first_seen,
+            caveat_hash=ports.seen.caveat_hash,
+        )
+        return evaluate_all(snapshot, ctx)
 
     def do_review() -> int:
         now = clock()
@@ -223,6 +247,7 @@ def build_deps(
                 now=now,
                 run_id=_run_id("review", now),
                 self_deps=ports.self_deps,
+                rules=review_rules,
             ),
             _emit,
         )

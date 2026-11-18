@@ -62,6 +62,8 @@ class Snapshot:
     dep_graph: Mapping[str, tuple[str, ...]]
     services: Mapping[str, str]
     installed_names: frozenset[str]
+    # Casks among ``unjoinable``: report-only, so they never degrade a run.
+    unjoinable_casks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

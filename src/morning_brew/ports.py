@@ -77,6 +77,13 @@ class DigestPort(Protocol):
     def record_sent(self, when: datetime) -> None: ...
 
 
+class UnjoinableStorePort(Protocol):
+    """Formula names that were unjoinable on the last (non-dry) run."""
+
+    def read(self) -> frozenset[str]: ...
+    def write(self, names: frozenset[str]) -> None: ...
+
+
 class StatusPort(Protocol):
     def write(self, summary: Summary) -> None: ...
     def read(self) -> Summary | None: ...
@@ -114,3 +121,4 @@ class Ports:
     clock: Callable[[], datetime]
     self_deps: frozenset[str] = field(default_factory=frozenset)  # [R13]
     digest: DigestPort | None = None  # [R57]
+    unjoinable_seen: UnjoinableStorePort | None = None

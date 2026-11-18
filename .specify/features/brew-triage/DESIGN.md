@@ -170,7 +170,7 @@ Failure matrix (each row also in SPEC):
 |---|---|---|
 | `brew update` fails / no network | abort before mutation, exit 75 (log marker), hourly fire retries | n/a (degraded stamp) |
 | JSON unparseable | abort, exit 1 | n/a |
-| Unjoinable candidate | held transiently (never releases an existing hold or owner skip), run degraded ("unjoinable") | transient |
+| Unjoinable candidate | held transiently (never releases an existing hold or owner skip); the run is degraded ("unjoinable") only the first run a formula is seen unjoinable (last run's set kept in `unjoinable.json`); casks never degrade | transient |
 | Ollama down | local stage skipped; Claude still runs | none |
 | Ollama digest mismatch | local stage disabled, warn | none |
 | fnox fetch fails (10 s timeout) / Claude refusal, timeout, rate limit | GREY member excluded this run; auth/secret failure is one urgent anomaly | transient |

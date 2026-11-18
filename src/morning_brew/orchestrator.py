@@ -171,6 +171,13 @@ def _run_body(
     snapshot = ports.brew.snapshot()
     candidates = {c.full_name: c for c in snapshot.candidates}
     unjoinable = frozenset(snapshot.unjoinable)
+    # Casks are report-only; a formula degrades only the first run it is seen
+    # unjoinable (a name that stays unjoinable must not degrade forever).
+    formula_unjoinable = unjoinable - frozenset(snapshot.unjoinable_casks)
+    seen_before = (
+        ports.unjoinable_seen.read() if ports.unjoinable_seen is not None else None
+    )
+    new_unjoinable = formula_unjoinable - (seen_before or frozenset())
     live = ports.live.live_set(snapshot)
     pin_released: list[str] = []
     if not dry_run:
@@ -216,13 +223,26 @@ def _run_body(
             outcomes,
             idle,
             stale,
-            unjoinable,
+            formula_unjoinable,
+            new_unjoinable,
         )
         return RunResult(exit_code=EXIT_OK, summary=summary)
 
     _store_holds(ports, decisions, plans, outcomes, candidates, now)
     _store_unjoinable(ports, unjoinable, now)
     applied = _apply(ports, plans)
+
+    # [I1, FR-070] Audit what was done immediately after apply, before any
+    # bookkeeping or the verify snapshot: a later failure (a hold store or
+    # seen store OSError, a failed re-read) must never lose the record of an
+    # upgrade.
+    for event in _reconcile_events(run_id, now, snapshot, pin_released):
+        ports.audit.record(event)
+    for event in _audit_events(
+        run_id, now, snapshot, decisions, plans, outcomes, applied, "decide"
+    ):
+        ports.audit.record(event)
+
     _store_busy(ports, applied, candidates, now)
     for name in applied.upgraded:  # no longer outdated
         ports.holds.release(name)
@@ -230,15 +250,6 @@ def _run_body(
     _record_caveat_hashes(ports, applied, candidates)
     if applied.upgraded:
         ports.seen.record_upgrade(current_seq + 1, applied.upgraded)
-
-    # [I1] Audit what was done before re-reading brew: a failed verify
-    # snapshot must cost an anomaly, never the record of an upgrade.
-    for event in _reconcile_events(run_id, now, snapshot, pin_released):
-        ports.audit.record(event)
-    for event in _audit_events(
-        run_id, now, snapshot, decisions, plans, outcomes, applied, "decide"
-    ):
-        ports.audit.record(event)
     applied.anomalies.extend(_verify_after(ports, snapshot, applied))
     applied.anomalies.extend(extra)
 
@@ -252,7 +263,8 @@ def _run_body(
         outcomes,
         applied,
         stale,
-        unjoinable,
+        formula_unjoinable,
+        new_unjoinable,
     )
     try:
         ports.status.write(summary)
@@ -261,6 +273,11 @@ def _run_body(
     _notify(ports, summary)
     _send_digest(ports, config, now)
     ports.stamp.write(_next_stamp(prev_stamp, summary, now))
+    if ports.unjoinable_seen is not None:
+        try:
+            ports.unjoinable_seen.write(formula_unjoinable)
+        except Exception as exc:  # at worst one extra degraded run
+            log.warning("unjoinable names not recorded: %s", type(exc).__name__)
     return RunResult(exit_code=EXIT_OK, summary=summary)
 
 
@@ -691,7 +708,12 @@ def _summary(
     applied: _Applied,
     stale: bool,
     unjoinable: frozenset[str] = frozenset(),
+    new_unjoinable: frozenset[str] | None = None,
 ) -> Summary:
+    """``unjoinable`` are counted as transient; only ``new_unjoinable`` (first
+    seen this run; all of them when None) degrade the run."""
+    if new_unjoinable is None:
+        new_unjoinable = unjoinable
     holds = ports.holds.list_all()
     aging = hold_aging(holds, now)
     stale_names = [h.name for h in stale_holds(holds, now, config.stale_hold_days)]
@@ -713,7 +735,7 @@ def _summary(
     reasons: list[str] = []
     if transient:
         reasons.append("transient holds")
-    if unjoinable:  # [I6]
+    if new_unjoinable:  # [I6] only the first run a name is seen unjoinable
         reasons.append("unjoinable")
     self_dep_commands = tuple(
         "brew upgrade -- " + " ".join(sorted(p.members))

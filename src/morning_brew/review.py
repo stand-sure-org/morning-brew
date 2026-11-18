@@ -5,7 +5,7 @@ in one explicit ``brew upgrade -- ...`` call; skipping records the version so
 it is never auto-upgraded (R14); deferring does nothing. The tool never pins.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -61,7 +61,10 @@ def review(
     now: datetime,
     run_id: str,
     self_deps: frozenset[str] = frozenset(),
+    rules: Callable[[Snapshot], Sequence[Decision]] | None = None,
 ) -> ReviewResult:
+    """``rules`` re-evaluates the fresh snapshot (the orchestrator's rules and
+    context) so every component member that is not ELIGIBLE is flagged."""
     approved: list[str] = []
     skipped: list[str] = []
     deferred: list[str] = []
@@ -122,13 +125,18 @@ def review(
             record(h.name, "deferred", "self-dependency; manual command shown")
             deferred.append(h.name)
             return False
-        say("Component: " + " ".join(strip_control(m) for m in members))
-        flagged = _flag_members(h.name, members, holds)
-        if flagged:  # [I7] approving one hold must not silently clear others
-            say("Approving upgrades the whole component, including:")
-            for line in flagged:
-                say(f"  {line}")
-            if prompt("Type 'y' to upgrade them too: ") != "y":
+        if len(members) > 1:
+            # [I7, FR-080] approving one hold upgrades every member: always
+            # show them, flag any the rules or the ledger would not upgrade,
+            # and require an explicit 'y' even when nothing is flagged.
+            say("Component: " + " ".join(strip_control(m) for m in members))
+            flagged = _flag_members(h.name, members, holds)
+            flagged += _flag_by_rules(h.name, members, snapshot, rules)
+            if flagged:
+                say("Not cleared for an automatic upgrade:")
+                for line in flagged:
+                    say(f"  {line}")
+            if prompt("Type 'y' to upgrade the whole component: ") != "y":
                 say("Not confirmed; nothing upgraded.")
                 record(h.name, "deferred", "component members not confirmed")
                 deferred.append(h.name)
@@ -250,6 +258,26 @@ def _flag_members(
         else:
             why = f"held ({other.kind.value}): {other.reason}"
         lines.append(strip_control(f"{member}: {why}"))
+    return lines
+
+
+def _flag_by_rules(
+    name: str,
+    members: tuple[str, ...],
+    snapshot: Snapshot,
+    rules: Callable[[Snapshot], Sequence[Decision]] | None,
+) -> list[str]:
+    if rules is None:
+        return []
+    lines: list[str] = []
+    for d in rules(snapshot):
+        if d.full_name == name or d.full_name not in members:
+            continue
+        if d.verdict is Verdict.ELIGIBLE:
+            continue
+        lines.append(
+            strip_control(f"{d.full_name}: {d.verdict} ({d.rule_id}): {d.reason}")
+        )
     return lines
 
 

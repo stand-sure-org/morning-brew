@@ -155,9 +155,12 @@ closed.
 - `morning-brew review` walks the decided holds one by one: `a` approve
   (upgrades the whole component with an explicit `brew upgrade -- ...`),
   `s` skip this version (it will not be auto-upgraded, and no pin is made),
-  `d` defer. Before upgrading, approval lists every other member of the
-  component that has a hold or that you skipped, and needs `y` (anything
-  else aborts); a component with a pinned member is refused outright; brew's
+  `d` defer. When the component has more than the held package, approval
+  always lists every member, flags each one the rules would not upgrade on
+  their own (with the rule id, for example a soaking or untrusted-tap
+  member) or that has a hold or a skip of yours, and needs an exact `y`
+  (anything else aborts and keeps the hold); a component with a pinned
+  member is refused outright; brew's
   own `upgrade --dry-run` plan must match the component exactly. If a member
   is live (a running service or process), approval also needs you to type
   `yes`. `review` holds the run lock for its whole duration: while a

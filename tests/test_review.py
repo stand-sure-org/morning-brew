@@ -99,7 +99,7 @@ def two() -> Env:
 
 def test_approve_one_skip_one() -> None:
     env = two()
-    r = env.run(["a", "s"])
+    r = env.run(["a", "y", "s"])
     assert env.brew.upgrades == [("aws-c-auth", "aws-c-s3", "awscli")]
     assert r.skipped == ("grype",)
     assert r.approved == ("awscli",)
@@ -109,11 +109,11 @@ def test_approve_one_skip_one() -> None:
 
 def test_live_process_member_needs_explicit_yes() -> None:
     env = Env([hold("awscli")], live=frozenset({"aws-c-s3"}))
-    r = env.run(["a", "no"])
+    r = env.run(["a", "y", "no"])
     assert env.brew.upgrades == [] and env.holds.get("awscli") is not None
     assert r.approved == ()
     env = Env([hold("awscli")], live=frozenset({"aws-c-s3"}))
-    env.run(["a", "yes"])
+    env.run(["a", "y", "yes"])
     assert len(env.brew.upgrades) == 1
 
 
@@ -136,7 +136,7 @@ def test_display_has_package_version_reason_age() -> None:
 
 def test_review_never_pins() -> None:
     env = two()
-    env.run(["a", "s"])
+    env.run(["a", "y", "s"])
     assert not any("pin" in c for c in env.calls)
 
 
@@ -163,7 +163,7 @@ def test_only_decided_holds_listed() -> None:
 
 def test_audit_records_review_actions() -> None:
     env = two()
-    env.run(["a", "s"])
+    env.run(["a", "y", "s"])
     evs = [e for e in env.audit.events if e.stage == "review"]
     assert [(e.package, e.verdict, e.rule_id) for e in evs] == [
         ("awscli", "approved", None),
@@ -185,7 +185,7 @@ def test_no_longer_outdated_releases_without_upgrade() -> None:
 def test_busy_keeps_hold() -> None:
     env = Env([hold("awscli")])
     env.brew.busy_on = frozenset({"awscli"})
-    r = env.run(["a"])
+    r = env.run(["a", "y"])
     assert env.holds.get("awscli") is not None
     assert any("brew busy, try later" in line for line in env.out)
     assert r.approved == ()
@@ -194,7 +194,7 @@ def test_busy_keeps_hold() -> None:
 def test_failed_upgrade_keeps_hold_and_shows_redacted_tail() -> None:
     env = Env([hold("awscli")])
     env.brew.upgrade_results = {"awscli": UpgradeResult(False, "boom \x1b[31m!")}
-    env.run(["a"])
+    env.run(["a", "y"])
     assert env.holds.get("awscli") is not None
     assert any("boom" in line for line in env.out)
     assert not any("\x1b" in line for line in env.out)
@@ -333,9 +333,76 @@ def test_locked_review_holds_the_lock_for_the_whole_review() -> None:
 
 def test_review_always_lists_every_component_member() -> None:
     env = Env([hold("awscli")])
-    run_env(env, Asker(["a"]))
+    asker = Asker(["a", "y"])
+    run_env(env, asker)
     listed = [i for i, line in enumerate(env.out) if line.startswith("Component:")]
     upgraded = [i for i, line in enumerate(env.out) if line.startswith("Upgraded:")]
     assert listed and upgraded and listed[0] < upgraded[0]
     assert env.out[listed[0]] == "Component: aws-c-auth aws-c-s3 awscli"
     assert env.brew.upgrades == [("aws-c-auth", "aws-c-s3", "awscli")]
+    assert len(asker.prompts) == 2  # the approve, then the component 'y'
+
+
+def test_unflagged_multi_member_component_requires_y() -> None:
+    # [FR-080] no other member has a hold row, yet one keypress is not enough
+    env = Env([hold("awscli")])
+    asker = Asker(["a"])  # input ends at the component prompt
+    r = run_env(env, asker)
+    assert env.brew.upgrades == [] and r.approved == ()
+    assert len(asker.prompts) == 2 and "'y'" in asker.prompts[1]
+    assert env.holds.get("awscli") is not None
+
+
+@pytest.mark.parametrize("answer", ["n", "", "yes", "Y please"])
+def test_component_prompt_anything_but_y_aborts(answer: str) -> None:
+    env = Env([hold("awscli")])
+    r = run_env(env, Asker(["a", answer]))
+    assert env.brew.upgrades == [] and r.deferred == ("awscli",)
+    assert env.holds.get("awscli") is not None
+
+
+def test_singleton_component_needs_no_component_prompt() -> None:
+    env = Env([hold("grype")])
+    asker = Asker(["a"])
+    assert run_env(env, asker).approved == ("grype",)
+    assert len(asker.prompts) == 1
+
+
+def test_member_not_eligible_by_rules_is_flagged_with_rule_id() -> None:
+    from morning_brew.domain import Decision, Verdict
+
+    def rules(snapshot):
+        return [
+            Decision(c.full_name, Verdict.HOLD, "R06", "R06 untrusted tap x/y")
+            if c.full_name == "aws-c-s3"
+            else Decision(c.full_name, Verdict.DEFER, "R10", "soaking")
+            if c.full_name == "aws-c-auth"
+            else Decision(c.full_name, Verdict.ELIGIBLE, "R12", "clean")
+            for c in snapshot.candidates
+        ]
+
+    env = Env([hold("awscli")])
+    out = env.out
+    r = review(
+        env.holds, env.brew, plan_components, env.live, env.audit,
+        ask=Asker(["a", "n"]), say=out.append, now=NOW, run_id="r", rules=rules,
+    )  # fmt: skip
+    assert env.brew.upgrades == [] and r.deferred == ("awscli",)
+    flagged = "\n".join(out)
+    assert "aws-c-s3" in flagged and "R06" in flagged
+    assert "aws-c-auth" in flagged and "R10" in flagged and "defer" in flagged
+
+
+def test_rules_see_the_fresh_snapshot() -> None:
+    seen: list[object] = []
+
+    def rules(snapshot):
+        seen.append(snapshot)
+        return []
+
+    env = Env([hold("awscli")])
+    review(
+        env.holds, env.brew, plan_components, env.live, env.audit,
+        ask=Asker(["a", "y"]), say=env.out.append, now=NOW, run_id="r", rules=rules,
+    )  # fmt: skip
+    assert seen and seen[0] is env.brew.snapshots[0]

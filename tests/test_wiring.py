@@ -509,3 +509,32 @@ def test_digest_port_is_wired_to_state_dir(tmp_path):
     assert isinstance(deps.ports.digest, DigestChannel)
     assert deps.ports.digest._path == state(tmp_path) / "digest.json"
     assert deps.ports.digest.last_sent() is None
+
+
+# --- targeted fix: review rules and the unjoinable memory are wired ------------
+
+
+def test_review_gets_the_run_rules_on_its_snapshot(tmp_path, monkeypatch):
+    from builders import make_candidate, make_snapshot
+
+    got: dict[str, Any] = {}
+    monkeypatch.setattr(wiring, "review", lambda **kw: got.update(kw))
+    deps = build(tmp_path, 'trusted_taps = ["x/y"]\n')
+    monkeypatch.setattr(deps.ports.live, "live_set", lambda snap: frozenset())
+    deps.review()
+    snap = make_snapshot(make_candidate("evil", tap="bad/tap"))
+    (d,) = got["rules"](snap)
+    assert d.rule_id == "R06"
+
+
+def test_unjoinable_memory_is_wired_to_state_dir(tmp_path):
+    from morning_brew.store.unjoinable import FileUnjoinableStore
+
+    deps = build(tmp_path)
+    store = deps.ports.unjoinable_seen
+    assert isinstance(store, FileUnjoinableStore)
+    assert store.read() == frozenset()
+    store.write(frozenset({"ghost"}))
+    assert FileUnjoinableStore(state(tmp_path) / "unjoinable.json").read() == {"ghost"}
+    (state(tmp_path) / "unjoinable.json").write_text('{"not": "a list"}')
+    assert store.read() == frozenset()

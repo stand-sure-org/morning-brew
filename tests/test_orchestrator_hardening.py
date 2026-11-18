@@ -388,3 +388,68 @@ def test_unexpected_update_error_records_degraded_attempt():
     (stamp,) = ports.stamp.written
     assert stamp.quality == "degraded" and stamp.first_attempt == NOW
     assert "brew.snapshot" not in calls
+
+
+# --- targeted fix: audit right after apply; unjoinable degrades once ---------
+
+
+class ReleaseRaisingHolds(FakeHolds):
+    def release(self, name: str) -> None:
+        raise OSError("holds/ went read-only")
+
+
+def test_release_raising_after_upgrade_still_audits_the_upgrade():
+    calls: list[str] = []
+    ports = build(calls, decisions=[_elig("a")], holds=ReleaseRaisingHolds())
+    result = run_once(ports, Config())
+    assert result.exit_code == 1  # guarded: a recorded degraded attempt
+    events = [e for e in ports.audit.events if e.package == "a"]
+    assert [e.action_result for e in events] == ["upgraded"]
+    assert ports.stamp.written[-1].quality == "degraded"
+
+
+@dataclass
+class FakeUnjoinable:
+    last: frozenset[str] = frozenset()
+    written: list[frozenset[str]] = field(default_factory=list)
+
+    def read(self) -> frozenset[str]:
+        return self.last
+
+    def write(self, names: frozenset[str]) -> None:
+        self.written.append(names)
+        self.last = names
+
+
+def test_unjoinable_two_runs_in_a_row_second_is_full():
+    calls: list[str] = []
+    clock = Clock()
+    snap = make_snapshot(make_candidate("a"), unjoinable=("ghost",))
+    store = FakeUnjoinable()
+    ports = build(
+        calls,
+        decisions=[_elig("a")],
+        snapshot=snap,
+        clock=clock,
+        unjoinable_seen=store,
+    )
+    first = run_once(ports, Config())
+    assert first.summary.quality == "degraded"
+    assert "unjoinable" in first.summary.degraded_reasons
+    clock.now = NOW + timedelta(hours=1)  # degraded: the gate lets it retry
+    second = run_once(ports, Config())
+    assert second.summary is not None and second.summary.quality == "full"
+    assert ports.holds.get("ghost").kind is HoldKind.TRANSIENT  # hold stays
+    assert store.last == frozenset({"ghost"})
+
+
+def test_unjoinable_cask_never_degrades():
+    calls: list[str] = []
+    snap = make_snapshot(
+        make_candidate("a"), unjoinable=("some-cask",), unjoinable_casks=("some-cask",)
+    )
+    ports = build(
+        calls, decisions=[_elig("a")], snapshot=snap, unjoinable_seen=FakeUnjoinable()
+    )
+    result = run_once(ports, Config())
+    assert result.summary.quality == "full"

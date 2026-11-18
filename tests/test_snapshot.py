@@ -73,7 +73,18 @@ def test_unjoinable_is_reported_not_dropped():
     )
     s = build_snapshot(**inputs)
     assert s.unjoinable == ("ghost",)
+    assert s.unjoinable_casks == ()
     assert all(c.full_name != "ghost" for c in s.candidates)
+
+
+def test_unjoinable_cask_is_marked_as_a_cask():
+    inputs = fixture_inputs()
+    inputs["outdated"] = copy.deepcopy(inputs["outdated"])
+    inputs["outdated"]["casks"].append(
+        {"name": "ghost-cask", "installed_versions": ["1.0"], "current_version": "1.1"}
+    )
+    s = build_snapshot(**inputs)
+    assert "ghost-cask" in s.unjoinable and s.unjoinable_casks == ("ghost-cask",)
 
 
 def test_multiple_and_empty_installed_versions():

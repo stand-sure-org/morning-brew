@@ -95,11 +95,13 @@ def build_snapshot(
             )
         )
 
+    unjoinable_casks: list[str] = []
     for item in outdated_casks:
         name = item["name"]
         entry = casks.get(name)
         if entry is None:
             unjoinable.append(name)
+            unjoinable_casks.append(name)
             continue
         installed = newest_installed(item.get("installed_versions") or [])
         current = item["current_version"]
@@ -130,4 +132,5 @@ def build_snapshot(
         dep_graph=dep_graph,
         services=service_map,
         installed_names=frozenset(formulae),
+        unjoinable_casks=tuple(unjoinable_casks),
     )
