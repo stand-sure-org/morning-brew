@@ -186,7 +186,9 @@ def test_render_digest_lists_counts_and_stale_names() -> None:
     holds = [decided("old", age=20, reason="data migration"), decided("new", age=3)]
     text = render_digest(hold_aging(holds, NOW), stale_holds(holds, NOW, 14))
     assert "2 decided" in text and "oldest 20 days" in text
-    assert "old" in text and "data migration" in text
+    assert "old" in text
+    # [R57] the digest is a notification: hold reasons are untrusted-derived
+    assert "data migration" not in text
     assert "new:" not in text
 
 

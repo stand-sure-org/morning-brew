@@ -2,16 +2,17 @@
 
 Order: lock, update, snapshot, reconcile, deferred cleanup, rules, existing
 holds applied [R14], components, triage of GREY members, components again,
-apply, verify snapshot, audit, status, notify, stamp. Triage always completes
-before the first upgrade.
+apply, audit, verify snapshot, status, notify, weekly digest, stamp. Triage
+always completes before the first upgrade. Past the gate, any failure is a
+recorded degraded attempt (exit 1), never a silent crash [I1].
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from morning_brew.aging import hold_aging, stale_holds
+from morning_brew.aging import digest_due, hold_aging, render_digest, stale_holds
 from morning_brew.caveats import caveat_hash
 from morning_brew.config import Config
 from morning_brew.domain import (
@@ -20,12 +21,14 @@ from morning_brew.domain import (
     EXIT_TEMPFAIL,
     AuditEvent,
     BrewBusyError,
+    BrewParseError,
     BrewUpdateError,
     Candidate,
     ComponentPlan,
     Decision,
     Hold,
     HoldKind,
+    InvalidPackageName,
     LockHeld,
     RuleContext,
     RunResult,
@@ -58,20 +61,32 @@ BUDGET_REASON = "run budget exceeded; retry next run"
 SKIP_REASON = "skipped by owner for this version"
 
 
-def run_once(ports: Ports, config: Config, *, dry_run: bool = False) -> RunResult:
+AlarmsFn = Callable[[], Sequence[str]]
+
+
+def run_once(
+    ports: Ports,
+    config: Config,
+    *,
+    dry_run: bool = False,
+    alarms: AlarmsFn | None = None,
+) -> RunResult:
+    """One run. ``alarms`` is read after triage and its lines become urgent
+    anomalies of this run's single summary (status, notification, stamp)."""
     try:
         with ports.lock.acquire():
-            return _locked_run(ports, config, dry_run=dry_run)
+            return _locked_run(ports, config, dry_run=dry_run, alarms=alarms)
     except LockHeld:
         log.warning("another morning-brew run holds the lock; exiting")
         return RunResult(exit_code=EXIT_TEMPFAIL, summary=None)
 
 
-def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
+def _locked_run(
+    ports: Ports, config: Config, *, dry_run: bool, alarms: AlarmsFn | None
+) -> RunResult:
     now = ports.clock()
     run_id = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
     prev_stamp = ports.stamp.read()
-    current_seq = prev_stamp.full_runs if prev_stamp else 0
     stale = dead_man(now, prev_stamp, config.dead_man_hours)
 
     # A dry run is an explicit request: it bypasses the gate [R2].
@@ -94,13 +109,66 @@ def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
             log.exception("brew update failed; aborting before any mutation")
             _record_failed_attempt(ports, run_id, now, prev_stamp, config)
             return RunResult(exit_code=EXIT_TEMPFAIL, summary=None)
+    try:
+        return _run_body(
+            ports,
+            config,
+            now=now,
+            run_id=run_id,
+            prev_stamp=prev_stamp,
+            stale=stale,
+            dry_run=dry_run,
+            alarms=alarms,
+        )
+    except Exception as exc:
+        if dry_run:  # a dry run records nothing; the CLI reports the error
+            raise
+        # [I1] Past the gate every failure is a recorded, degraded attempt so
+        # the dead-man can trip instead of the run vanishing silently.
+        if isinstance(exc, _EXPECTED_ERRORS):
+            log.error(
+                "run aborted after the gate: %s: %s", type(exc).__name__, _line(exc)
+            )
+        else:
+            log.exception("run aborted after the gate")
+        _record_failed_attempt(ports, run_id, now, prev_stamp, config)
+        return RunResult(exit_code=EXIT_ERROR, summary=None)
+
+
+_EXPECTED_ERRORS = (
+    BrewParseError,
+    BrewBusyError,
+    InvalidPackageName,
+    StateUnwritable,
+    OSError,
+)
+
+
+def _line(exc: BaseException) -> str:
+    lines = str(exc).strip().splitlines()
+    return lines[0] if lines else type(exc).__name__
+
+
+def _run_body(
+    ports: Ports,
+    config: Config,
+    *,
+    now: datetime,
+    run_id: str,
+    prev_stamp: Stamp | None,
+    stale: bool,
+    dry_run: bool,
+    alarms: AlarmsFn | None,
+) -> RunResult:
+    current_seq = prev_stamp.full_runs if prev_stamp else 0
     snapshot = ports.brew.snapshot()
     candidates = {c.full_name: c for c in snapshot.candidates}
+    unjoinable = frozenset(snapshot.unjoinable)
     live = ports.live.live_set(snapshot)
     pin_released: list[str] = []
     if not dry_run:
         pin_released = ports.reconcile(snapshot, ports.holds)
-        _release_not_outdated(ports, candidates)
+        _release_not_outdated(ports, candidates, unjoinable)
         _deferred_cleanup(ports, config, current_seq, live)
         for c in snapshot.candidates:
             ports.seen.record_first_seen(c.full_name, c.current, now)
@@ -123,44 +191,96 @@ def _locked_run(ports: Ports, config: Config, *, dry_run: bool) -> RunResult:
             for d in decisions
         ]
         plans = ports.components(snapshot, decisions)
+    extra = tuple(alarms()) if alarms is not None else ()
 
     if dry_run:
-        idle = _Applied()
+        idle = _Applied(anomalies=list(extra))
         for event in _audit_events(
             run_id, now, snapshot, decisions, plans, outcomes, idle, "dry_run"
         ):
             ports.audit.record(event)
         summary = _summary(
-            run_id, now, config, ports, decisions, plans, outcomes, idle, stale
+            run_id,
+            now,
+            config,
+            ports,
+            decisions,
+            plans,
+            outcomes,
+            idle,
+            stale,
+            unjoinable,
         )
         return RunResult(exit_code=EXIT_OK, summary=summary)
 
     _store_holds(ports, decisions, plans, outcomes, candidates, now)
+    _store_unjoinable(ports, unjoinable, now)
     applied = _apply(ports, plans)
     _store_busy(ports, applied, candidates, now)
     for name in applied.upgraded:  # no longer outdated
         ports.holds.release(name)
-    _release_stale_transients(ports, decisions, applied)
+    _release_stale_transients(ports, decisions, applied, unjoinable)
     _record_caveat_hashes(ports, applied, candidates)
     if applied.upgraded:
         ports.seen.record_upgrade(current_seq + 1, applied.upgraded)
-    post = ports.brew.snapshot()
-    applied.anomalies.extend(_verify(snapshot, post, applied))
 
+    # [I1] Audit what was done before re-reading brew: a failed verify
+    # snapshot must cost an anomaly, never the record of an upgrade.
     for event in _reconcile_events(run_id, now, snapshot, pin_released):
         ports.audit.record(event)
     for event in _audit_events(
         run_id, now, snapshot, decisions, plans, outcomes, applied, "decide"
     ):
         ports.audit.record(event)
+    applied.anomalies.extend(_verify_after(ports, snapshot, applied))
+    applied.anomalies.extend(extra)
 
     summary = _summary(
-        run_id, now, config, ports, decisions, plans, outcomes, applied, stale
+        run_id,
+        now,
+        config,
+        ports,
+        decisions,
+        plans,
+        outcomes,
+        applied,
+        stale,
+        unjoinable,
     )
-    ports.status.write(summary)
+    try:
+        ports.status.write(summary)
+    except Exception as exc:  # the run itself succeeded; keep its exit code
+        log.error("status not written: %s", type(exc).__name__)
     _notify(ports, summary)
+    _send_digest(ports, config, now)
     ports.stamp.write(_next_stamp(prev_stamp, summary, now))
     return RunResult(exit_code=EXIT_OK, summary=summary)
+
+
+def _verify_after(ports: Ports, pre: Snapshot, applied: _Applied) -> list[str]:
+    try:
+        post = ports.brew.snapshot()
+    except Exception as exc:
+        log.error("post-apply verify snapshot failed: %s", type(exc).__name__)
+        return [f"post-apply verify failed: {type(exc).__name__}"]
+    return _verify(pre, post, applied)
+
+
+def _send_digest(ports: Ports, config: Config, now: datetime) -> None:
+    """[R57] Weekly, through the normal channel; counts and names only."""
+    if ports.digest is None:
+        return
+    try:
+        if not digest_due(ports.digest.last_sent(), now):
+            return
+        holds = ports.holds.list_all()
+        text = render_digest(
+            hold_aging(holds, now), stale_holds(holds, now, config.stale_hold_days)
+        )
+        if ports.digest.send(text):
+            ports.digest.record_sent(now)
+    except Exception as exc:  # a digest must never fail the run
+        log.warning("weekly digest not sent: %s", type(exc).__name__)
 
 
 def _record_failed_attempt(
@@ -218,16 +338,25 @@ def _deferred_cleanup(
     ports.brew.cleanup([name for name in due if name not in live])
 
 
-def _release_not_outdated(ports: Ports, candidates: Mapping[str, Candidate]) -> None:
-    """[R14] A hold whose package is no longer outdated has nothing to hold."""
+def _release_not_outdated(
+    ports: Ports, candidates: Mapping[str, Candidate], unjoinable: frozenset[str]
+) -> None:
+    """[R14] A hold whose package is no longer outdated has nothing to hold.
+
+    [I6] An unjoinable name is still outdated (brew listed it), only its info
+    is missing; its hold, including an owner skip, is kept.
+    """
     for hold in ports.holds.list_all():
-        if hold.name not in candidates:
+        if hold.name not in candidates and hold.name not in unjoinable:
             log.info("releasing hold for %s: no longer outdated", hold.name)
             ports.holds.release(hold.name)
 
 
 def _release_stale_transients(
-    ports: Ports, decisions: Sequence[Decision], applied: _Applied
+    ports: Ports,
+    decisions: Sequence[Decision],
+    applied: _Applied,
+    unjoinable: frozenset[str],
 ) -> None:
     """[FR-061] A transient row lives one run: retried, it is held, busy or gone.
 
@@ -238,7 +367,7 @@ def _release_stale_transients(
     for hold in ports.holds.list_all():
         if hold.kind is not HoldKind.TRANSIENT:
             continue
-        if hold.name in held or hold.name in busy:
+        if hold.name in held or hold.name in busy or hold.name in unjoinable:
             continue
         ports.holds.release(hold.name)
 
@@ -361,6 +490,29 @@ def _store_holds(
                 model_reasoning=outcome.reasoning if outcome else None,
             )
         ports.holds.put(hold)
+
+
+UNJOINABLE_REASON = "unjoinable: brew listed it outdated without info; retry"
+
+
+def _store_unjoinable(ports: Ports, names: frozenset[str], now: datetime) -> None:
+    """[I6] An outdated name brew gave no info for is held transiently.
+
+    An existing row (a decided hold, an owner skip, last run's transient) is
+    never overwritten: its version, first_held and skip must survive.
+    """
+    for name in sorted(names):
+        if ports.holds.get(name) is not None:
+            continue
+        ports.holds.put(
+            Hold(
+                name=name,
+                kind=HoldKind.TRANSIENT,
+                held_at_version="",
+                reason=UNJOINABLE_REASON,
+                first_held=now,
+            )
+        )
 
 
 def _store_busy(
@@ -531,6 +683,7 @@ def _summary(
     outcomes: Mapping[str, TriageOutcome],
     applied: _Applied,
     stale: bool,
+    unjoinable: frozenset[str] = frozenset(),
 ) -> Summary:
     holds = ports.holds.list_all()
     aging = hold_aging(holds, now)
@@ -541,10 +694,20 @@ def _summary(
             f"stale holds (over {config.stale_hold_days} days): "
             + ", ".join(stale_names)
         )
-    # Run quality follows this run's transients, not ledger rows.
-    transient = sum(1 for d in decisions if d.hold_kind is HoldKind.TRANSIENT) + len(
-        applied.busy
-    )
+    # Run quality follows this run's transients, not ledger rows. [R55] A
+    # shadow outcome (would_be set) is the chain working as designed: it is
+    # retried daily and does not degrade the run.
+    shadow = {n for n, o in outcomes.items() if o.would_be is not None}
+    transient = sum(
+        1
+        for d in decisions
+        if d.hold_kind is HoldKind.TRANSIENT and d.full_name not in shadow
+    ) + len(applied.busy)
+    reasons: list[str] = []
+    if transient:
+        reasons.append("transient holds")
+    if unjoinable:  # [I6]
+        reasons.append("unjoinable")
     self_dep_commands = tuple(
         "brew upgrade -- " + " ".join(sorted(p.members))
         for p in plans
@@ -552,19 +715,19 @@ def _summary(
     )
     return Summary(
         run_id=run_id,
-        quality="degraded" if transient else "full",
+        quality="degraded" if reasons else "full",
         upgraded=tuple(applied.upgraded),
         failed=tuple(applied.failed),
         decided_holds=aging.decided_count,
         oldest_decided_hold_days=aging.oldest_decided_days,
         blocked_by_dep=aging.blocked_by_dep_count,
-        transient=transient,
+        transient=transient + len(unjoinable),
         self_dep_commands=self_dep_commands,
         disagreements=tuple(n for n, o in outcomes.items() if o.disagreement),
         live_old_binary=(),
         anomalies=tuple(anomalies),
         dead_man=stale,
-        degraded_reasons=("transient holds",) if transient else (),
+        degraded_reasons=tuple(reasons),
     )
 
 

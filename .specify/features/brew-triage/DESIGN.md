@@ -1,5 +1,9 @@
 # DESIGN: brew-triage
 
+**Version:** 1.2 (Post-final-review fixes)
+**Date:** 2026-11-18
+**Changes:** R55: shadow holds are retried once per day and do not degrade the run (section 10, section 7 item 5). R56: live mode without a gate pass falls back to shadow with an urgent anomaly. I1: post-gate failures are recorded degraded attempts; audit is written before the verify snapshot. I6: unjoinable names are transient holds that degrade the run. R57: weekly digest via the normal notifier.
+
 **Version:** 1.1 (Post-Delphi)
 **Date:** 2026-11-17
 **Changes:** Folds in the 2-round, 5-panelist Delphi review (`reviews/delphi-2026-11-17.md`) and the four owner decisions. Removed: confidence/caps/threshold scheme, bounded drop-iteration with dry-run parsing as primary, glm advisor stage, OpenAI-compatible adapter, cask apply path, all pin creation/ownership/unpin machinery, `fnox exec` plist wrapper, two calendar slots plus RunAtLoad, `say`-by-default. Added: connected-component decision unit, live-process set, tap trust and soak, caveat diffing, boolean risk fields with coverage check, decided/transient holds, reconcile and dead-man alarm, hold aging, golden set and shadow mode, lazy `fnox get` with env allowlist.
@@ -122,7 +126,7 @@ Chain, for GREY members only [USER O2, O3; PANEL D4, D5]:
 2. Local classifier (qwen3:4b), optional: classifies caveat text into required booleans `mentions_migration`, `mentions_data_format`, `mentions_restart`, `mentions_manual_step`, `boilerplate_only`, emitted BEFORE `verdict` in the schema. **[USER, post-v1.1 approval]** Local output never causes an upgrade and never causes a hold: it is a recorded second opinion. A local risk flag routes the member to Claude exactly as an all-clear does; Claude still judges blind. When local and Claude disagree (local flagged, Claude cleared), the run summary and `status` surface it as "local flagged, Claude cleared", with the local reasoning labeled as derived from untrusted text. Rationale: qwen3:4b flagged risk on nearly every probe sample (E5), so a local veto would hold almost every caveat-bearing GREY case unseen by Claude and feed hold rot. Its value is measured by the golden set (T16) and the agreement rate in the audit log; if it adds nothing, drop it in v1.1. `think:false`, `num_predict` about 400, truncated or invalid JSON (one retry) -> unsure, which skips the local stage and goes to Claude with the deterministic flags (not a hold).
 3. Claude (L3), judging blind (facts and sanitized caveat only, never the local stage's reasoning). Schema: the same required booleans first, then `verdict: upgrade|hold`. Accepted as UPGRADE only if: all risk booleans false (or `boilerplate_only` true), `verdict == upgrade`, and the deterministic coverage check passes (a keyword scan of the caveat finds migration/data/restart/manual cues; each cue found must be reflected by the corresponding boolean). Any miss -> HOLD (decided) or unsure -> transient hold. No confidence field, no thresholds or caps.
 4. L3 is the only stage that may turn GREY into UPGRADE. No model may turn a HOLD, SKIP, DEFER or REPORT into UPGRADE. L3 runs even when Ollama is down. fnox fetch failure, refusal, timeout, rate limit -> transient hold.
-5. Mode: until the ship gate (section 11) is passed and the owner flips `chain.mode = live`, the chain runs in shadow mode: GREY members are held (transient, reason "shadow") while the would-be verdicts are audited.
+5. Mode: until the ship gate (section 11) is passed and the owner flips `chain.mode = live`, the chain runs in shadow mode: GREY members are held (transient, reason "shadow") while the would-be verdicts are audited. [R55] A shadow hold is the chain working as designed, not a failure: it does not degrade the run, so the once-per-day gate applies and shadow holds are re-triaged once per day, not hourly. [R56] `chain.mode = live` without a recorded gate pass does not stop `run`: the chain is built in shadow mode and the run carries the urgent anomaly "live locked: gate not passed".
 
 Prompt armoring: system prompt carries instructions; user message carries a fixed facts block plus untrusted fields wrapped in `<untrusted-{token_hex(8)}>` tags with collision stripping, 2000-char caps, redaction. Printed model reasoning is stripped of ANSI/control characters and labeled "derived from untrusted text".
 
@@ -155,7 +159,9 @@ State dir `~/.local/state/morning-brew/` mode 0700, files 0600; the config file 
 
 - Subprocesses: argv lists only, `shell=False`, `stdin=DEVNULL`, timeouts, child environment from an explicit allowlist (PATH including `/opt/homebrew/bin`, HOME, `HOMEBREW_NO_AUTO_UPDATE`, `HOMEBREW_NO_ANALYTICS`, `HOMEBREW_NO_ENV_HINTS`, `HOMEBREW_NO_INSTALL_CLEANUP`). A test asserts no notifier child env contains `*KEY*` or `*TOKEN*`.
 - Component fails -> recorded failed, run continues, retried next run; not held, not pinned.
-- Verify: re-snapshot; held/skipped packages must be unchanged; violations are anomalies (urgent).
+- Verify: audit events for the apply are written first, then re-snapshot; held/skipped packages must be unchanged; violations are anomalies (urgent). A failed verify snapshot is itself an anomaly; the audit is never lost [I1].
+- Any failure after the run gate (snapshot, rules, apply, stamp) is recorded as a degraded attempt (stamp with `first_attempt` set even on a never-succeeded install), runs the dead-man check (urgent if tripped) and exits 1 [I1]. A failed status write after a successful run is logged only (exit 0).
+- Run quality [R55]: transient holds from outages, budget, busy brew and unjoinable names degrade the run (hourly retry). Shadow outcomes (would-be verdicts) do not: they are retried on the next day's run.
 - Cleanup (O4): after 2 full successful runs, per-package `brew cleanup <pkg>` for packages upgraded by those runs, never for the live-process set. `HOMEBREW_NO_INSTALL_CLEANUP=1` keeps `brew upgrade` from cleaning implicitly. README documents manual rollback (no automated rollback; zero rollback window today, E8).
 
 Failure matrix (each row also in SPEC):
@@ -164,10 +170,13 @@ Failure matrix (each row also in SPEC):
 |---|---|---|
 | `brew update` fails / no network | abort before mutation, exit 75 (log marker), hourly fire retries | n/a (degraded stamp) |
 | JSON unparseable | abort, exit 1 | n/a |
-| Unjoinable candidate | exclude component | transient |
+| Unjoinable candidate | held transiently (never releases an existing hold or owner skip), run degraded ("unjoinable") | transient |
 | Ollama down | local stage skipped; Claude still runs | none |
 | Ollama digest mismatch | local stage disabled, warn | none |
-| fnox fetch fails (10 s timeout) / Claude refusal, timeout, rate limit | GREY member excluded this run | transient |
+| fnox fetch fails (10 s timeout) / Claude refusal, timeout, rate limit | GREY member excluded this run; auth/secret failure is one urgent anomaly | transient |
+| Shadow mode would-be verdict | held, audited, retried next day; run stays full [R55] | transient |
+| Live mode without gate pass | chain built in shadow mode, urgent anomaly "live locked: gate not passed" [R56] | transient |
+| Snapshot or any post-gate step raises | degraded attempt stamped, dead-man check, exit 1 [I1] | n/a |
 | Model contradicts coverage check | HOLD | decided |
 | Closure cross-check mismatch | component excluded, anomaly audited | transient |
 | Partial upgrade failure | record, continue, retry next run | none |

@@ -66,6 +66,17 @@ class NotifierPort(Protocol):
     def notify(self, summary: Summary, *, urgent: bool) -> None: ...
 
 
+class DigestPort(Protocol):
+    """[R57] The weekly hold digest: when it was last delivered, and a sender."""
+
+    def last_sent(self) -> datetime | None: ...
+    def send(self, text: str) -> bool:
+        """True only when the digest was actually delivered."""
+        ...
+
+    def record_sent(self, when: datetime) -> None: ...
+
+
 class StatusPort(Protocol):
     def write(self, summary: Summary) -> None: ...
     def read(self) -> Summary | None: ...
@@ -102,3 +113,4 @@ class Ports:
     stamp: StampPort
     clock: Callable[[], datetime]
     self_deps: frozenset[str] = field(default_factory=frozenset)  # [R13]
+    digest: DigestPort | None = None  # [R57]

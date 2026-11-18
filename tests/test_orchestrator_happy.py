@@ -80,8 +80,8 @@ def test_call_order_and_explicit_upgrades(ports: Ports, calls: list[str]) -> Non
         "brew.upgrade:a",
         "brew.upgrade:b,c",
         "brew.upgrade:grype",
+        "audit",  # [I1] audited before the verify snapshot
         "brew.snapshot",
-        "audit",
         "notify",
         "stamp.write",
     ]

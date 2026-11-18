@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from morning_brew.domain import Hold, HoldKind
+from morning_brew.textsafe import strip_control
 
 DIGEST_INTERVAL = timedelta(days=7)
 
@@ -67,8 +68,11 @@ def render_digest(aging: Aging, stale: Sequence[Hold]) -> str:
     ]
     if stale:
         lines.append("Stale holds:")
+        # [R57] sent as a notification: names and versions only, never the
+        # hold reason (it can derive from untrusted caveat or model text).
         lines.extend(
-            f"- {h.name}: held at {h.held_at_version} - {h.reason}" for h in stale
+            f"- {strip_control(h.name)}: held at {strip_control(h.held_at_version)}"
+            for h in stale
         )
     else:
         lines.append("No stale holds.")
