@@ -346,3 +346,45 @@ def test_digest_failure_never_fails_the_run():
     result = run_once(ports, Config())
     assert result.exit_code == 0
     assert ports.stamp.written[-1].quality == "full"
+
+
+# --- I1: the two pre-snapshot post-gate steps are guarded too ---------------
+
+
+class UnwritableHolds(FakeHolds):
+    def ensure_writable(self) -> None:
+        from morning_brew.domain import StateUnwritable
+
+        raise StateUnwritable("holds/ is read-only")
+
+
+def test_unwritable_state_records_attempt_and_trips_dead_man():
+    calls: list[str] = []
+    old = NOW - timedelta(days=3)
+    ports = build(
+        calls,
+        decisions=[_elig("a")],
+        holds=UnwritableHolds(),
+        stamp=FakeStamp(calls, stamp=Stamp(old, old, "full", 5, old)),
+    )
+    result = run_once(ports, Config())
+    assert result.exit_code == 1
+    assert ports.stamp.written[-1].quality == "degraded"
+    ((summary, urgent),) = ports.notifier.sent
+    assert urgent and summary.dead_man
+    assert "brew.update" not in calls
+
+
+def test_unexpected_update_error_records_degraded_attempt():
+    calls: list[str] = []
+    brew = FakeBrew(
+        calls,
+        [make_snapshot(make_candidate("a"))],
+        raise_on_update=RuntimeError("weird"),
+    )
+    ports = build(calls, decisions=[_elig("a")], brew=brew)
+    result = run_once(ports, Config())
+    assert result.exit_code == 1
+    (stamp,) = ports.stamp.written
+    assert stamp.quality == "degraded" and stamp.first_attempt == NOW
+    assert "brew.snapshot" not in calls

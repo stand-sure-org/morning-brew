@@ -122,6 +122,7 @@ def review(
             record(h.name, "deferred", "self-dependency; manual command shown")
             deferred.append(h.name)
             return False
+        say("Component: " + " ".join(strip_control(m) for m in members))
         flagged = _flag_members(h.name, members, holds)
         if flagged:  # [I7] approving one hold must not silently clear others
             say("Approving upgrades the whole component, including:")

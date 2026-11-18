@@ -101,7 +101,10 @@ def _locked_run(
         try:
             ports.holds.ensure_writable()
         except StateUnwritable:
-            log.exception("state directory is not writable; aborting before update")
+            log.error("state directory is not writable; aborting before update")
+            # [I1] still an attempt: the stamp may be writable even when
+            # holds/ is not, and the dead-man must be able to trip
+            _record_failed_attempt(ports, run_id, now, prev_stamp, config)
             return RunResult(exit_code=EXIT_ERROR, summary=None)
         try:
             ports.brew.update()
@@ -109,6 +112,10 @@ def _locked_run(
             log.exception("brew update failed; aborting before any mutation")
             _record_failed_attempt(ports, run_id, now, prev_stamp, config)
             return RunResult(exit_code=EXIT_TEMPFAIL, summary=None)
+        except Exception:
+            log.exception("brew update raised unexpectedly; aborting")
+            _record_failed_attempt(ports, run_id, now, prev_stamp, config)
+            return RunResult(exit_code=EXIT_ERROR, summary=None)
     try:
         return _run_body(
             ports,

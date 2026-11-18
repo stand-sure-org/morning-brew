@@ -329,3 +329,13 @@ def test_locked_review_holds_the_lock_for_the_whole_review() -> None:
     lock = FakeLock(calls)
     assert locked_review(lock, lambda: calls.append("review"), lambda s: None) == 0
     assert calls == ["lock", "review"]
+
+
+def test_review_always_lists_every_component_member() -> None:
+    env = Env([hold("awscli")])
+    run_env(env, Asker(["a"]))
+    listed = [i for i, line in enumerate(env.out) if line.startswith("Component:")]
+    upgraded = [i for i, line in enumerate(env.out) if line.startswith("Upgraded:")]
+    assert listed and upgraded and listed[0] < upgraded[0]
+    assert env.out[listed[0]] == "Component: aws-c-auth aws-c-s3 awscli"
+    assert env.brew.upgrades == [("aws-c-auth", "aws-c-s3", "awscli")]

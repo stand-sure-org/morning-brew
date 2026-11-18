@@ -238,9 +238,12 @@ def test_notifier_failure_does_not_fail_run(ports_with, calls) -> None:
 
 
 def test_unwritable_state_exits_1_before_update(ports_with, calls) -> None:
-    r = run_once(ports_with(holds=UnwritableHolds()), Config())
+    ports = ports_with(holds=UnwritableHolds())
+    r = run_once(ports, Config())
     assert r.exit_code == 1
-    assert "brew.update" not in calls and "stamp.write" not in calls
+    assert "brew.update" not in calls
+    # [I1] still a recorded (degraded) attempt, so the dead-man can trip
+    assert [s.quality for s in ports.stamp.written] == ["degraded"]
 
 
 def test_rules_only_run_makes_no_model_call(ports_with) -> None:  # FR-093
