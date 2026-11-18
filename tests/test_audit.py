@@ -323,3 +323,76 @@ def test_auth_scheme_after_keyword_does_not_leak(text):
     assert TAIL[:4] not in out and TAIL[4:] not in out
     assert "***REDACTED***" in out
     assert redact(out) == out
+
+
+# --- M1: quoted values to the closing quote, unquoted to whitespace ----------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'password: "' + TAIL[:4] + " " + TAIL[4:8] + " " + TAIL[8:] + '"',
+        "token = '" + TAIL[:4] + " " + TAIL[4:] + "'",
+        '{"secret": "' + TAIL[:4] + " " + TAIL[4:] + '"}',
+        AWS_NAME + ' = "' + TAIL[:4] + " " + TAIL[4:] + '"',
+        "{'ANTHROPIC_" + "API_KEY': '" + TAIL[:4] + " " + TAIL[4:] + "'}",
+    ],
+)
+def test_quoted_value_redacted_to_closing_quote(text):
+    out = redact(text)
+    assert TAIL[:4] not in out and TAIL[4:8] not in out and TAIL[8:] not in out
+    assert "***REDACTED***" in out
+    assert redact(out) == out
+
+
+def test_quoted_value_keeps_quotes_so_json_stays_valid():
+    import json as _json
+
+    out = redact('{"password": "' + TAIL + ' x", "user": "me"}')
+    assert _json.loads(out) == {"password": "***REDACTED***", "user": "me"}
+
+
+def test_unquoted_value_runs_past_commas_to_whitespace():
+    out = redact("password=" + TAIL[:6] + "," + TAIL[6:] + " next")
+    assert TAIL[:6] not in out and TAIL[6:] not in out
+    assert out == "password=***REDACTED*** next"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Authorization: Basic " + TAIL,
+        '{"Authorization": "Basic ' + TAIL + '"}',
+        "authorization=basic " + TAIL,
+    ],
+)
+def test_authorization_basic_redacted(text):
+    out = redact(text)
+    assert TAIL not in out and "***REDACTED***" in out
+    assert redact(out) == out
+
+
+def test_basic_in_prose_untouched():
+    assert redact("Basic usage: run brew services") == (
+        "Basic usage: run brew services"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ('password: "' + "a" * 5000) * 20,
+        ("token='" + "b" * 3000 + " ") * 30,
+        "password=" * 20000,
+        "token: " + " " * 100000,
+        ('"password": "' + "x" * 50 + '", ') * 3000,
+        "Authorization: Basic " * 10000,
+    ],
+)
+def test_redact_stays_linear_on_adversarial_input(text):
+    import time
+
+    start = time.monotonic()
+    once = redact(text)
+    assert redact(once) == once
+    assert time.monotonic() - start < 0.5

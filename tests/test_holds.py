@@ -185,3 +185,15 @@ def test_symlinked_hold_is_skipped(tmp_path, caplog):
         assert s.get("real") is None
         assert [h.name for h in s.list_all()] == ["other"]
     assert "symlink" in caplog.text
+
+
+def test_model_reasoning_is_redacted_before_storing(tmp_path):
+    # [M1] the reasoning derives from untrusted text and is shown by review
+    secret = "Q7xZ" + "9" * 12
+    store = FileHoldStore(tmp_path)
+    store.put(hold("grype", model_reasoning="it said token=" + secret + " ok"))
+    raw = (tmp_path / "holds" / "grype.json").read_text()
+    assert secret not in raw
+    got = store.get("grype")
+    assert got is not None and secret not in (got.model_reasoning or "")
+    assert "***REDACTED***" in (got.model_reasoning or "")

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from morning_brew.domain import Hold, HoldKind, StateUnwritable
+from morning_brew.sanitize import redact
 from morning_brew.store.atomic import read_json_or_none, write_json_atomic
 
 log = logging.getLogger(__name__)
@@ -30,7 +31,10 @@ def _to_json(hold: Hold) -> dict:
         "reason": hold.reason,
         "first_held": hold.first_held.isoformat(),
         "blocked_by": hold.blocked_by,
-        "model_reasoning": hold.model_reasoning,
+        # [M1] derived from untrusted text; never stored with a secret in it
+        "model_reasoning": (
+            redact(hold.model_reasoning) if hold.model_reasoning is not None else None
+        ),
         "skipped_for_version": hold.skipped_for_version,
     }
 
