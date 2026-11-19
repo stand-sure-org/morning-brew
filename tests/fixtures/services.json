@@ -1,0 +1,212 @@
+[
+  {
+    "name": "caddy",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/caddy/sh.brew.caddy.plist",
+    "exit_code": null
+  },
+  {
+    "name": "cockroach",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/cockroach/sh.brew.cockroach.plist",
+    "exit_code": null
+  },
+  {
+    "name": "dnsmasq",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/dnsmasq/sh.brew.dnsmasq.plist",
+    "exit_code": null
+  },
+  {
+    "name": "etcd",
+    "status": "started",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/homebrew.mxcl.etcd.plist",
+    "exit_code": null
+  },
+  {
+    "name": "grafana",
+    "status": "started",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/sh.brew.grafana.plist",
+    "exit_code": 1
+  },
+  {
+    "name": "grafana-alloy",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/grafana-alloy/sh.brew.grafana-alloy.plist",
+    "exit_code": null
+  },
+  {
+    "name": "haproxy",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/haproxy/sh.brew.haproxy.plist",
+    "exit_code": null
+  },
+  {
+    "name": "knot",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/knot/sh.brew.knot.plist",
+    "exit_code": null
+  },
+  {
+    "name": "logrotate",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/logrotate/homebrew.mxcl.logrotate.plist",
+    "exit_code": null
+  },
+  {
+    "name": "loki",
+    "status": "started",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/sh.brew.loki.plist",
+    "exit_code": null
+  },
+  {
+    "name": "mariadb",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/mariadb/sh.brew.mariadb.plist",
+    "exit_code": null
+  },
+  {
+    "name": "nats-server",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/nats-server/sh.brew.nats-server.plist",
+    "exit_code": null
+  },
+  {
+    "name": "nginx",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/nginx/sh.brew.nginx.plist",
+    "exit_code": null
+  },
+  {
+    "name": "node_exporter",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/node_exporter/homebrew.mxcl.node_exporter.plist",
+    "exit_code": null
+  },
+  {
+    "name": "postgresql@16",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/postgresql@16/sh.brew.postgresql@16.plist",
+    "exit_code": null
+  },
+  {
+    "name": "postgresql@18",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/postgresql@18/sh.brew.postgresql@18.plist",
+    "exit_code": null
+  },
+  {
+    "name": "prometheus",
+    "status": "started",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/homebrew.mxcl.prometheus.plist",
+    "exit_code": null
+  },
+  {
+    "name": "pyroscope",
+    "status": "none",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/homebrew.mxcl.pyroscope.plist",
+    "exit_code": null
+  },
+  {
+    "name": "rabbitmq",
+    "status": "started",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/homebrew.mxcl.rabbitmq.plist",
+    "exit_code": null
+  },
+  {
+    "name": "redis",
+    "status": "none",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/homebrew.mxcl.redis.plist",
+    "exit_code": null
+  },
+  {
+    "name": "selenium-server",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/selenium-server/sh.brew.selenium-server.plist",
+    "exit_code": null
+  },
+  {
+    "name": "sling",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/sling/sh.brew.sling.plist",
+    "exit_code": null
+  },
+  {
+    "name": "telegraf",
+    "status": "none",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/homebrew.mxcl.telegraf.plist",
+    "exit_code": null
+  },
+  {
+    "name": "toxiproxy",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/toxiproxy/sh.brew.toxiproxy.plist",
+    "exit_code": null
+  },
+  {
+    "name": "typesense-server@30.2",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/typesense-server@30.2/homebrew.mxcl.typesense-server@30.2.plist",
+    "exit_code": null
+  },
+  {
+    "name": "unbound",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/unbound/sh.brew.unbound.plist",
+    "exit_code": null
+  },
+  {
+    "name": "valkey",
+    "status": "started",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/homebrew.mxcl.valkey.plist",
+    "exit_code": null
+  },
+  {
+    "name": "vector",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/vector/sh.brew.vector.plist",
+    "exit_code": null
+  },
+  {
+    "name": "zellij",
+    "status": "none",
+    "user": null,
+    "file": "/opt/homebrew/opt/zellij/sh.brew.zellij.plist",
+    "exit_code": null
+  },
+  {
+    "name": "zookeeper",
+    "status": "none",
+    "user": "christopheranderson",
+    "file": "/Users/christopheranderson/Library/LaunchAgents/homebrew.mxcl.zookeeper.plist",
+    "exit_code": null
+  }
+]
