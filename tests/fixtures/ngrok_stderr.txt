@@ -1,0 +1,4 @@
+Warning: Calling `postflight` is deprecated! Use `postflight_steps` instead.
+Please report this issue to the ngrok/homebrew-ngrok tap (not Homebrew/* repositories), or even better, submit a PR to fix it:
+  /opt/homebrew/Library/Taps/ngrok/homebrew-ngrok/Casks/ngrok.rb:18
+

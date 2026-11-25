@@ -1,0 +1,231 @@
+{
+  "formulae": [
+    {
+      "name": "aws-c-auth",
+      "installed_versions": [
+        "1.0.4_1"
+      ],
+      "current_version": "1.1.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "aws-c-s3",
+      "installed_versions": [
+        "1.5.2_2"
+      ],
+      "current_version": "1.5.2_3",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "awscli",
+      "installed_versions": [
+        "2.40.3_1"
+      ],
+      "current_version": "2.40.4",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "ballerina",
+      "installed_versions": [
+        "2201.14.1"
+      ],
+      "current_version": "2201.14.2",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "calm-cli",
+      "installed_versions": [
+        "1.72.0"
+      ],
+      "current_version": "1.73.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "docker",
+      "installed_versions": [
+        "29.9.3"
+      ],
+      "current_version": "29.10.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "fnox",
+      "installed_versions": [
+        "1.48.0"
+      ],
+      "current_version": "1.49.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "grype",
+      "installed_versions": [
+        "0.121.3"
+      ],
+      "current_version": "0.122.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "hugo",
+      "installed_versions": [
+        "0.170.0"
+      ],
+      "current_version": "0.170.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "imagemagick",
+      "installed_versions": [
+        "7.1.2-35"
+      ],
+      "current_version": "7.1.2-36",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "numpy",
+      "installed_versions": [
+        "2.5.4"
+      ],
+      "current_version": "2.5.5",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "jandedobbeleer/oh-my-posh/oh-my-posh",
+      "installed_versions": [
+        "32.1.0"
+      ],
+      "current_version": "33.0.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "oras",
+      "installed_versions": [
+        "1.3.6"
+      ],
+      "current_version": "1.4.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "pkgconf",
+      "installed_versions": [
+        "3.0.10"
+      ],
+      "current_version": "3.0.11",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "rabbitmq",
+      "installed_versions": [
+        "4.4.0"
+      ],
+      "current_version": "4.4.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "redis",
+      "installed_versions": [
+        "7.2.7"
+      ],
+      "current_version": "8.10.3",
+      "pinned": true,
+      "pinned_version": "7.2.7"
+    },
+    {
+      "name": "skopeo",
+      "installed_versions": [
+        "1.25.1"
+      ],
+      "current_version": "1.25.2",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "smartthingscommunity/smartthings/smartthings",
+      "installed_versions": [
+        "3.0.0"
+      ],
+      "current_version": "3.0.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "specify",
+      "installed_versions": [
+        "1.4.0"
+      ],
+      "current_version": "1.4.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "summarize",
+      "installed_versions": [
+        "0.26.0"
+      ],
+      "current_version": "0.26.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "syft",
+      "installed_versions": [
+        "1.57.1"
+      ],
+      "current_version": "1.57.2",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "usage",
+      "installed_versions": [
+        "7.3.0"
+      ],
+      "current_version": "7.4.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "vectordotdev/brew/vector",
+      "installed_versions": [
+        "0.61.0"
+      ],
+      "current_version": "0.62.0",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "werf",
+      "installed_versions": [
+        "2.84.0"
+      ],
+      "current_version": "2.84.1",
+      "pinned": false,
+      "pinned_version": null
+    }
+  ],
+  "casks": [
+    {
+      "name": "antigravity-cli",
+      "installed_versions": [
+        "1.5.9,4515810895593472"
+      ],
+      "current_version": "1.5.10,5253791805734912",
+      "pinned": false,
+      "pinned_version": null
+    }
+  ]
+}

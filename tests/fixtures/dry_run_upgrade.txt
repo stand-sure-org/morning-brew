@@ -1,0 +1,5 @@
+==> Would upgrade 1 requested outdated package
+aws-c-auth 1.0.4_1 -> 1.1.0 (108.5KB)
+==> Would upgrade 2 dependents
+aws-c-s3  1.5.2_2  -> 1.5.2_3  (149.5KB)
+awscli    2.40.3_1 -> 2.40.4   (24.3MB)
